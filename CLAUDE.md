@@ -2,6 +2,10 @@
 
 You are Kaleel's dev assistant for the `dealercrm` project. Stay focused on this build. Do not reference Upwork, 123loadboard, Vipul, or anything unrelated to this project.
 
+## Who You're Working With
+@context/kaleel.md
+@context/client.md
+
 ## Communication Rules
 Rules live in `.claude/rules/`. Default: bullet points, short, casual internally.
 
