@@ -4,13 +4,13 @@ import { supabase } from "../lib/supabase";
 
 const STAGES = ["new", "contacted", "warm", "hot", "closed", "unsubscribed"];
 
-const STAGE_COLORS = {
-  new: "bg-gray-100 text-gray-700",
-  contacted: "bg-blue-100 text-blue-700",
-  warm: "bg-yellow-100 text-yellow-700",
-  hot: "bg-red-100 text-red-700",
-  closed: "bg-green-100 text-green-700",
-  unsubscribed: "bg-gray-100 text-gray-400",
+const STAGE_STYLES = {
+  new:          { bg: "#f1f5f9", color: "#475569" },
+  contacted:    { bg: "#dbeafe", color: "#1d4ed8" },
+  warm:         { bg: "#fef3c7", color: "#b45309" },
+  hot:          { bg: "#fee2e2", color: "#b91c1c" },
+  closed:       { bg: "#dcfce7", color: "#15803d" },
+  unsubscribed: { bg: "#f1f5f9", color: "#94a3b8" },
 };
 
 export default function LeadDetail() {
@@ -23,9 +23,7 @@ export default function LeadDetail() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    fetchAll();
-  }, [id]);
+  useEffect(() => { fetchAll(); }, [id]);
 
   async function fetchAll() {
     setLoading(true);
@@ -41,12 +39,7 @@ export default function LeadDetail() {
   }
 
   async function updateStage(stage) {
-    const { data } = await supabase
-      .from("leads")
-      .update({ stage })
-      .eq("id", id)
-      .select()
-      .single();
+    const { data } = await supabase.from("leads").update({ stage }).eq("id", id).select().single();
     if (data) setLead(data);
   }
 
@@ -54,87 +47,99 @@ export default function LeadDetail() {
     e.preventDefault();
     if (!newNote.trim()) return;
     setSaving(true);
-    const { data } = await supabase
-      .from("notes")
-      .insert({ lead_id: id, content: newNote.trim() })
-      .select()
-      .single();
+    const { data } = await supabase.from("notes").insert({ lead_id: id, content: newNote.trim() }).select().single();
     if (data) setNotes([data, ...notes]);
     setNewNote("");
     setSaving(false);
   }
 
-  if (loading) return <div className="p-6 text-sm text-gray-400">Loading...</div>;
-  if (!lead) return <div className="p-6 text-sm text-red-500">Lead not found.</div>;
+  if (loading) return <div className="p-6 text-sm" style={{ color: "#94a3b8" }}>Loading...</div>;
+  if (!lead) return <div className="p-6 text-sm" style={{ color: "#dc2626" }}>Lead not found.</div>;
+
+  const stageStyle = STAGE_STYLES[lead.stage] || STAGE_STYLES.new;
+  const fullName = `${lead.first_name} ${lead.last_name}`;
 
   return (
-    <div className="p-6 max-w-4xl">
+    <div className="p-6 max-w-5xl">
       {/* Back */}
       <button
         onClick={() => navigate("/leads")}
-        className="text-sm text-gray-500 hover:text-gray-700 mb-4 flex items-center gap-1"
+        className="flex items-center gap-1.5 text-sm mb-5 transition-colors"
+        style={{ color: "#64748b" }}
+        onMouseEnter={e => e.currentTarget.style.color = "#0f172a"}
+        onMouseLeave={e => e.currentTarget.style.color = "#64748b"}
       >
-        ← Back to leads
+        <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+          <polyline points="15 18 9 12 15 6" />
+        </svg>
+        Back to leads
       </button>
 
-      {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h2 className="text-xl font-semibold text-gray-900">
-            {lead.first_name} {lead.last_name}
-          </h2>
-          <p className="text-sm text-gray-500 mt-0.5">{lead.phone} · {lead.email}</p>
+      {/* Header card */}
+      <div className="bg-white rounded-xl p-5 mb-4" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-4">
+            <div
+              className="w-11 h-11 rounded-full flex items-center justify-center text-base font-semibold text-white shrink-0"
+              style={{ backgroundColor: "#1e3a5f" }}
+            >
+              {`${(lead.first_name || "?")[0]}${(lead.last_name || "")[0] || ""}`.toUpperCase()}
+            </div>
+            <div>
+              <h1 className="text-lg font-semibold" style={{ color: "#0f172a" }}>{fullName}</h1>
+              <p className="text-sm mt-0.5" style={{ color: "#64748b" }}>
+                {lead.phone}{lead.email ? ` · ${lead.email}` : ""}
+              </p>
+            </div>
+          </div>
+          <select
+            value={lead.stage}
+            onChange={(e) => updateStage(e.target.value)}
+            className="text-xs font-semibold px-3 py-1.5 rounded-full border-0 cursor-pointer capitalize focus:outline-none"
+            style={{ backgroundColor: stageStyle.bg, color: stageStyle.color }}
+          >
+            {STAGES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
         </div>
-        <select
-          value={lead.stage}
-          onChange={(e) => updateStage(e.target.value)}
-          className={`text-xs font-medium px-3 py-1.5 rounded-full border-0 cursor-pointer capitalize ${STAGE_COLORS[lead.stage]}`}
-        >
-          {STAGES.map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
       </div>
 
       {/* Info grid */}
-      <div className="grid grid-cols-2 gap-4 mb-6 bg-white rounded-lg border border-gray-200 p-4">
-        <InfoRow label="Source" value={lead.source} />
-        <InfoRow label="Vehicle interest" value={lead.vehicle_interest || "—"} />
-        <InfoRow label="Intent score" value={lead.intent_score || "—"} />
-        <InfoRow label="Sequence step" value={lead.sequence_step ?? "—"} />
-        <InfoRow label="SMS count" value={lead.sms_count ?? 0} />
-        <InfoRow label="Opted out" value={lead.opted_out ? "Yes" : "No"} />
-        <InfoRow
-          label="Next follow-up"
-          value={lead.next_follow_up ? new Date(lead.next_follow_up).toLocaleString() : "—"}
-        />
-        <InfoRow
-          label="Last reply"
-          value={lead.last_reply_at ? new Date(lead.last_reply_at).toLocaleString() : "—"}
-        />
+      <div className="bg-white rounded-xl p-5 mb-4" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+        <h2 className="text-xs font-semibold tracking-wider mb-4" style={{ color: "#64748b" }}>LEAD DETAILS</h2>
+        <div className="grid grid-cols-4 gap-4">
+          <InfoItem label="Source" value={lead.source} />
+          <InfoItem label="Vehicle Interest" value={lead.vehicle_interest || "—"} />
+          <InfoItem label="Intent Score" value={lead.intent_score || "—"} />
+          <InfoItem label="Sequence Step" value={lead.sequence_step ?? "—"} />
+          <InfoItem label="SMS Count" value={lead.sms_count ?? 0} />
+          <InfoItem label="Opted Out" value={lead.opted_out ? "Yes" : "No"} />
+          <InfoItem label="Next Follow-up" value={lead.next_follow_up ? new Date(lead.next_follow_up).toLocaleString() : "—"} />
+          <InfoItem label="Last Reply" value={lead.last_reply_at ? new Date(lead.last_reply_at).toLocaleString() : "—"} />
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-6">
+      {/* SMS + Notes */}
+      <div className="grid grid-cols-2 gap-4">
         {/* SMS thread */}
-        <div>
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">SMS Thread</h3>
-          <div className="space-y-2 max-h-96 overflow-y-auto">
+        <div className="bg-white rounded-xl p-5" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+          <h2 className="text-xs font-semibold tracking-wider mb-4" style={{ color: "#64748b" }}>SMS THREAD</h2>
+          <div className="space-y-2 overflow-y-auto" style={{ maxHeight: "380px" }}>
             {messages.length === 0 ? (
-              <p className="text-xs text-gray-400">No messages yet.</p>
+              <p className="text-xs" style={{ color: "#94a3b8" }}>No messages yet.</p>
             ) : (
               messages.map((msg) => (
                 <div
                   key={msg.id}
-                  className={`rounded-lg px-3 py-2 text-sm max-w-xs ${
-                    msg.direction === "outbound"
-                      ? "bg-blue-600 text-white ml-auto"
-                      : "bg-gray-100 text-gray-800"
-                  }`}
+                  className={`rounded-xl px-3.5 py-2.5 text-sm ${msg.direction === "outbound" ? "ml-8" : "mr-8"}`}
+                  style={{
+                    backgroundColor: msg.direction === "outbound" ? "#2563eb" : "#f1f5f9",
+                    color: msg.direction === "outbound" ? "white" : "#0f172a",
+                  }}
                 >
-                  <p>{msg.body}</p>
-                  <p className={`text-xs mt-1 ${msg.direction === "outbound" ? "text-blue-200" : "text-gray-400"}`}>
+                  <p className="leading-relaxed">{msg.body}</p>
+                  <p className="text-xs mt-1" style={{ opacity: 0.65 }}>
                     {new Date(msg.sent_at).toLocaleString()}
-                    {msg.demo && " [DEMO]"}
+                    {msg.demo && " · demo"}
                   </p>
                 </div>
               ))
@@ -143,29 +148,31 @@ export default function LeadDetail() {
         </div>
 
         {/* Notes */}
-        <div>
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">Notes</h3>
-          <form onSubmit={addNote} className="mb-3">
+        <div className="bg-white rounded-xl p-5" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+          <h2 className="text-xs font-semibold tracking-wider mb-4" style={{ color: "#64748b" }}>NOTES</h2>
+          <form onSubmit={addNote} className="mb-4">
             <textarea
               value={newNote}
               onChange={(e) => setNewNote(e.target.value)}
               placeholder="Add a note..."
               rows={3}
-              className="w-full text-sm px-3 py-2 border border-gray-200 rounded-md resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full text-sm px-3 py-2.5 border rounded-lg resize-none focus:outline-none"
+              style={{ borderColor: "#e2e8f0", color: "#0f172a" }}
             />
             <button
               type="submit"
               disabled={saving || !newNote.trim()}
-              className="mt-1 px-3 py-1.5 text-xs font-medium bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-40"
+              className="mt-2 px-4 py-1.5 text-xs font-semibold rounded-lg text-white transition-opacity disabled:opacity-40"
+              style={{ backgroundColor: "#2563eb" }}
             >
               {saving ? "Saving..." : "Add note"}
             </button>
           </form>
-          <div className="space-y-2 max-h-72 overflow-y-auto">
+          <div className="space-y-2 overflow-y-auto" style={{ maxHeight: "280px" }}>
             {notes.map((note) => (
-              <div key={note.id} className="bg-white border border-gray-200 rounded-md px-3 py-2">
-                <p className="text-sm text-gray-800">{note.content}</p>
-                <p className="text-xs text-gray-400 mt-1">{new Date(note.created_at).toLocaleString()}</p>
+              <div key={note.id} className="rounded-lg px-3.5 py-2.5" style={{ backgroundColor: "#f8fafc", border: "1px solid #f1f5f9" }}>
+                <p className="text-sm" style={{ color: "#0f172a" }}>{note.content}</p>
+                <p className="text-xs mt-1" style={{ color: "#94a3b8" }}>{new Date(note.created_at).toLocaleString()}</p>
               </div>
             ))}
           </div>
@@ -175,11 +182,11 @@ export default function LeadDetail() {
   );
 }
 
-function InfoRow({ label, value }) {
+function InfoItem({ label, value }) {
   return (
     <div>
-      <dt className="text-xs font-medium text-gray-500">{label}</dt>
-      <dd className="text-sm text-gray-900 mt-0.5 capitalize">{value}</dd>
+      <dt className="text-xs font-medium mb-0.5" style={{ color: "#94a3b8" }}>{label}</dt>
+      <dd className="text-sm font-medium capitalize" style={{ color: "#0f172a" }}>{value}</dd>
     </div>
   );
 }
