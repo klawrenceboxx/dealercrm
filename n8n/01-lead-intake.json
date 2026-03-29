@@ -1,0 +1,161 @@
+{
+  "name": "01 — Lead Intake",
+  "nodes": [
+    {
+      "id": "wh-intake",
+      "name": "Intake Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "parameters": {
+        "path": "lead-intake",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "code-normalize",
+      "name": "Normalize Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const d = $input.item.json;\n\n// Normalize phone to E.164 (+1 Canada/US default)\nlet phone = (d.phone || '').replace(/[^\\d+]/g, '');\nif (phone && !phone.startsWith('+')) phone = '+1' + phone;\n\nif (!phone) {\n  // No phone — log error, halt this item\n  throw new Error('Lead missing phone number: ' + JSON.stringify(d));\n}\n\nreturn {\n  json: {\n    first_name: (d.first_name || d.firstName || '').trim(),\n    last_name: (d.last_name || d.lastName || '').trim(),\n    email: (d.email || '').trim().toLowerCase(),\n    phone,\n    source: d.source || 'website',\n    vehicle_interest: (d.vehicle_interest || d.vehicle || '').trim(),\n    stage: 'new',\n    sequence_step: 0,\n    opted_out: false,\n    sms_count: 0,\n    demo_mode: true\n  }\n};"
+      }
+    },
+    {
+      "id": "http-check-dupe",
+      "name": "Check Duplicate Phone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?phone=eq.{{ encodeURIComponent($json.phone) }}&select=id,phone&limit=1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-dupe",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond1",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "noop-skip",
+      "name": "Skip — Already Exists",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1120, 200],
+      "parameters": {}
+    },
+    {
+      "id": "http-insert-lead",
+      "name": "Insert Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 400],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($('Normalize Fields').item.json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "code-prep-trigger",
+      "name": "Prep WF02 Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 400],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// $json here is the inserted lead row returned by Supabase\nconst lead = Array.isArray($json) ? $json[0] : $json;\nreturn {\n  json: {\n    lead_id: lead.id,\n    trigger_type: 'first_contact'\n  }\n};"
+      }
+    },
+    {
+      "id": "http-trigger-wf02",
+      "name": "Trigger AI SMS Engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 400],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_SMS_ENGINE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Intake Webhook": {
+      "main": [[{ "node": "Normalize Fields", "type": "main", "index": 0 }]]
+    },
+    "Normalize Fields": {
+      "main": [[{ "node": "Check Duplicate Phone", "type": "main", "index": 0 }]]
+    },
+    "Check Duplicate Phone": {
+      "main": [[{ "node": "Is Duplicate?", "type": "main", "index": 0 }]]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [{ "node": "Skip — Already Exists", "type": "main", "index": 0 }],
+        [{ "node": "Insert Lead", "type": "main", "index": 0 }]
+      ]
+    },
+    "Insert Lead": {
+      "main": [[{ "node": "Prep WF02 Payload", "type": "main", "index": 0 }]]
+    },
+    "Prep WF02 Payload": {
+      "main": [[{ "node": "Trigger AI SMS Engine", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "notes": "Receives leads from website form or Meta Lead Ads. Normalizes phone to E.164, checks for duplicate, inserts into Supabase, triggers Workflow 02. Set N8N_WEBHOOK_SMS_ENGINE env var after activating WF02." }
+}

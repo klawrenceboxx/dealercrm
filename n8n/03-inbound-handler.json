@@ -1,0 +1,417 @@
+{
+  "name": "03 — Inbound SMS Handler",
+  "nodes": [
+    {
+      "id": "wh-inbound",
+      "name": "Twilio Inbound Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "parameters": {
+        "path": "twilio-inbound",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "notes": "Set this webhook URL in Twilio console: Messaging → Active numbers → [your number] → 'A message comes in'"
+    },
+    {
+      "id": "code-extract-twilio",
+      "name": "Extract Twilio Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Twilio sends URL-encoded form data\nconst body = $json.body || $json.Body || '';\nconst from = $json.from || $json.From || '';\nconst to = $json.to || $json.To || '';\n\nconst OPT_OUT_KEYWORDS = ['stop', 'unsubscribe', 'quit', 'cancel', 'end'];\nconst isOptOut = OPT_OUT_KEYWORDS.includes(body.trim().toLowerCase());\n\nreturn {\n  json: {\n    inbound_body: body,\n    from_phone: from,\n    to_phone: to,\n    is_opt_out: isOptOut\n  }\n};"
+      }
+    },
+    {
+      "id": "http-find-lead",
+      "name": "Find Lead by Phone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?phone=eq.{{ encodeURIComponent($json.from_phone) }}&select=*&limit=1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-optout",
+      "name": "Opt-Out?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-optout",
+              "leftValue": "={{ $('Extract Twilio Fields').first().json.is_opt_out }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "http-update-optout",
+      "name": "Mark Opted Out",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 180],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?phone=eq.{{ encodeURIComponent($('Extract Twilio Fields').first().json.from_phone) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\"opted_out\": true, \"stage\": \"unsubscribed\", \"next_follow_up\": null}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-send-optout-confirm",
+      "name": "Send Opt-Out Confirmation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 180],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.TWILIO_ACCOUNT_SID + ':' + $env.TWILIO_AUTH_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type", "value": "application/x-www-form-urlencoded" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "From", "value": "={{ $env.TWILIO_FROM_NUMBER }}" },
+            { "name": "To", "value": "={{ $('Extract Twilio Fields').first().json.from_phone }}" },
+            { "name": "Body", "value": "=You've been unsubscribed from {{ $env.DEALERSHIP_NAME }}. Text START to re-subscribe." }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-log-inbound",
+      "name": "Log Inbound Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 420],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ lead_id: ($json[0] || $json).id, direction: 'inbound', body: $('Extract Twilio Fields').first().json.inbound_body, demo: false }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-update-last-reply",
+      "name": "Update last_reply_at",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 420],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?phone=eq.{{ encodeURIComponent($('Extract Twilio Fields').first().json.from_phone) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ last_reply_at: new Date().toISOString() }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-get-history",
+      "name": "Get Last 3 Messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 420],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log?lead_id=eq.{{ ($('Find Lead by Phone').first().json[0] || $('Find Lead by Phone').first().json).id }}&order=sent_at.desc&limit=3&select=direction,body",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "code-build-reply-prompt",
+      "name": "Build Reply Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 420],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const lead = $('Find Lead by Phone').first().json[0] || $('Find Lead by Phone').first().json;\nconst inboundBody = $('Extract Twilio Fields').first().json.inbound_body;\nconst history = $('Get Last 3 Messages').all().map(i => i.json);\n\nconst convoSnippet = history.reverse().map(m =>\n  `${m.direction === 'inbound' ? 'CUSTOMER' : 'US'}: ${m.body}`\n).join('\\n');\n\nconst systemPrompt = `You are an AI assistant for ${$env.DEALERSHIP_NAME} in ${$env.DEALERSHIP_CITY}.\nSales contact: ${$env.SALESPERSON_NAME}, ${$env.SALESPERSON_PHONE}\nHours: ${$env.DEALERSHIP_HOURS}\n\nRULES:\n- SMS under 160 characters\n- Professional but warm\n- No filler phrases\n- Respond directly to what the customer said\n\nOUTPUT FORMAT: JSON only.\n{\"sms_text\": \"...\", \"intent_score\": \"hot|warm|cold\", \"intent_reasoning\": \"1 sentence\"}`;\n\nconst userMessage = `LEAD CONTEXT:\nName: ${lead.first_name} ${lead.last_name}\nVehicle interest: ${lead.vehicle_interest || '(not specified)'}\nTrigger: inbound_reply\n\nRECENT CONVERSATION:\n${convoSnippet}\n\nNEW MESSAGE FROM CUSTOMER: ${inboundBody}\n\nRespond naturally and classify intent based on this reply.`;\n\nreturn [{ json: { lead, systemPrompt, userMessage } }];"
+      }
+    },
+    {
+      "id": "http-claude-reply",
+      "name": "Claude — Generate Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 420],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 256, system: $json.systemPrompt, messages: [{ role: 'user', content: $json.userMessage }] }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "code-parse-reply",
+      "name": "Parse Reply + Calc Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 420],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const lead = $('Build Reply Prompt').first().json.lead;\nconst rawText = $json.content[0].text.trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(rawText);\n} catch (e) {\n  parsed = { sms_text: 'Thanks for your reply! I will be in touch shortly.', intent_score: 'warm', intent_reasoning: 'Fallback' };\n}\n\nconst stageMap = { hot: 'hot', warm: 'warm', cold: 'warm' };\nconst newStage = stageMap[parsed.intent_score] || lead.stage;\n\nlet nextFollowUp = null;\nif (parsed.intent_score !== 'hot') {\n  const d = new Date();\n  d.setDate(d.getDate() + 3);\n  nextFollowUp = d.toISOString();\n}\n\nreturn {\n  json: {\n    lead,\n    sms_text: parsed.sms_text,\n    intent_score: parsed.intent_score,\n    new_stage: newStage,\n    next_follow_up: nextFollowUp\n  }\n};"
+      }
+    },
+    {
+      "id": "http-send-reply",
+      "name": "Send Reply SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2440, 420],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.TWILIO_ACCOUNT_SID + ':' + $env.TWILIO_AUTH_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type", "value": "application/x-www-form-urlencoded" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "From", "value": "={{ $env.TWILIO_FROM_NUMBER }}" },
+            { "name": "To", "value": "={{ $json.lead.phone }}" },
+            { "name": "Body", "value": "={{ $json.sms_text }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-log-outbound-reply",
+      "name": "Log Outbound Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2660, 420],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ lead_id: $json.lead.id, direction: 'outbound', body: $json.sms_text, trigger_type: 'inbound_reply', demo: false }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-update-lead-reply",
+      "name": "Update Lead Stage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2880, 420],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $('Parse Reply + Calc Updates').first().json.lead.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ stage: $('Parse Reply + Calc Updates').first().json.new_stage, intent_score: $('Parse Reply + Calc Updates').first().json.intent_score, next_follow_up: $('Parse Reply + Calc Updates').first().json.next_follow_up }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "if-hot-reply",
+      "name": "Hot Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3100, 420],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-hot-reply",
+              "leftValue": "={{ $('Parse Reply + Calc Updates').first().json.intent_score }}",
+              "rightValue": "hot",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "http-trigger-wf05-reply",
+      "name": "Trigger Hot Lead Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3320, 320],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_HOT_LEAD }}",
+        "sendHeaders": true,
+        "headerParameters": [{ "name": "Content-Type", "value": "application/json" }],
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ lead_id: $('Parse Reply + Calc Updates').first().json.lead.id }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "noop-done-reply",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [3320, 520],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Twilio Inbound Webhook": {
+      "main": [[{ "node": "Extract Twilio Fields", "type": "main", "index": 0 }]]
+    },
+    "Extract Twilio Fields": {
+      "main": [[{ "node": "Find Lead by Phone", "type": "main", "index": 0 }]]
+    },
+    "Find Lead by Phone": {
+      "main": [[{ "node": "Opt-Out?", "type": "main", "index": 0 }]]
+    },
+    "Opt-Out?": {
+      "main": [
+        [{ "node": "Mark Opted Out", "type": "main", "index": 0 }],
+        [{ "node": "Log Inbound Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Mark Opted Out": {
+      "main": [[{ "node": "Send Opt-Out Confirmation", "type": "main", "index": 0 }]]
+    },
+    "Log Inbound Message": {
+      "main": [[{ "node": "Update last_reply_at", "type": "main", "index": 0 }]]
+    },
+    "Update last_reply_at": {
+      "main": [[{ "node": "Get Last 3 Messages", "type": "main", "index": 0 }]]
+    },
+    "Get Last 3 Messages": {
+      "main": [[{ "node": "Build Reply Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build Reply Prompt": {
+      "main": [[{ "node": "Claude — Generate Reply", "type": "main", "index": 0 }]]
+    },
+    "Claude — Generate Reply": {
+      "main": [[{ "node": "Parse Reply + Calc Updates", "type": "main", "index": 0 }]]
+    },
+    "Parse Reply + Calc Updates": {
+      "main": [[{ "node": "Send Reply SMS", "type": "main", "index": 0 }]]
+    },
+    "Send Reply SMS": {
+      "main": [[{ "node": "Log Outbound Reply", "type": "main", "index": 0 }]]
+    },
+    "Log Outbound Reply": {
+      "main": [[{ "node": "Update Lead Stage", "type": "main", "index": 0 }]]
+    },
+    "Update Lead Stage": {
+      "main": [[{ "node": "Hot Lead?", "type": "main", "index": 0 }]]
+    },
+    "Hot Lead?": {
+      "main": [
+        [{ "node": "Trigger Hot Lead Alert", "type": "main", "index": 0 }],
+        [{ "node": "Done", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "notes": "Handles inbound SMS from Twilio. Checks for STOP/UNSUBSCRIBE first (TCPA compliance), logs inbound, fetches conversation history, generates AI reply via Claude, sends reply, updates lead stage. Set this webhook URL in Twilio console under 'A message comes in'." }
+}

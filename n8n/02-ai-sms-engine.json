@@ -1,0 +1,324 @@
+{
+  "name": "02 — AI SMS Engine",
+  "nodes": [
+    {
+      "id": "wh-sms",
+      "name": "SMS Engine Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "parameters": {
+        "path": "sms-engine",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-get-lead",
+      "name": "Get Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $json.lead_id }}&select=*&limit=1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-get-inventory",
+      "name": "Get Inventory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 460],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/inventory?available=eq.true&select=year,make,model,trim,color,mileage_km,price,stock_number&order=price.asc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "code-build-prompt",
+      "name": "Build Claude Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 380],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const lead = $('Get Lead').first().json[0] || $('Get Lead').first().json;\nconst inventory = $('Get Inventory').all().map(i => i.json);\nconst triggerType = $('SMS Engine Webhook').first().json.trigger_type;\n\nconst inventoryText = inventory.map(v =>\n  `${v.year} ${v.make} ${v.model} ${v.trim || ''} — ${v.color || ''} — ${v.mileage_km ? v.mileage_km.toLocaleString() + ' km' : 'New'} — $${Number(v.price).toLocaleString()}`\n).join('\\n');\n\nconst triggerInstructions = {\n  first_contact: 'This is the very first message. Introduce yourself briefly, reference their vehicle interest if provided, ask one qualifying question. Sign with your first name.',\n  follow_up_day3: 'Lead has not replied in 3 days. Short, friendly check-in. One question only. Keep it under 100 characters if possible.',\n  follow_up_day7: 'No reply in 7 days. Try a different angle — ask about timing or budget, not the specific vehicle.',\n  follow_up_day14: 'Two weeks with no reply. This is a last real attempt. Keep it human and low-pressure.',\n  follow_up_day30: 'Final follow-up. Acknowledge that some time has passed. Leave the door open for the future.',\n  inbound_reply: 'The lead just replied. Respond naturally and directly to what they said. Classify intent based on their message.'\n};\n\nconst systemPrompt = `You are an AI assistant for ${ $env.DEALERSHIP_NAME} in ${$env.DEALERSHIP_CITY}.\nSales contact: ${$env.SALESPERSON_NAME}, ${$env.SALESPERSON_PHONE}\nHours: ${$env.DEALERSHIP_HOURS}\n\nCURRENT AVAILABLE INVENTORY:\n${inventoryText}\n\nRULES:\n- SMS under 160 characters unless content truly requires more\n- Professional but warm — not pushy, not robotic\n- Never use em dashes\n- No filler phrases\n- Always include a clear next step or question\n- Sign with salesperson first name on first contact only\n- Never lie about inventory availability\n\nOUTPUT FORMAT: JSON only.\n{\"sms_text\": \"...\", \"intent_score\": \"hot|warm|cold\", \"intent_reasoning\": \"1 sentence\"}\n\nINTENT DEFINITIONS:\nhot: asking for price/availability, wants test drive, ready to buy\nwarm: engaged, comparing options, needs nurturing\ncold: no reply yet, vague interest, or generic inquiry`;\n\nconst userMessage = `LEAD CONTEXT:\nName: ${lead.first_name} ${lead.last_name}\nSource: ${lead.source}\nVehicle interest: ${lead.vehicle_interest || '(not specified)'}\nTrigger: ${triggerType}\nSequence step: ${lead.sequence_step}\n\nTRIGGER INSTRUCTIONS: ${triggerInstructions[triggerType] || triggerInstructions.first_contact}`;\n\nreturn [{\n  json: {\n    lead,\n    triggerType,\n    systemPrompt,\n    userMessage\n  }\n}];"
+      }
+    },
+    {
+      "id": "http-claude",
+      "name": "Call Claude API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [920, 380],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 256, system: $json.systemPrompt, messages: [{ role: 'user', content: $json.userMessage }] }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "code-parse-claude",
+      "name": "Parse Claude Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 380],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const lead = $('Build Claude Prompt').first().json.lead;\nconst rawText = $json.content[0].text.trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(rawText);\n} catch (e) {\n  // Fallback if Claude returns invalid JSON\n  parsed = {\n    sms_text: `Hi ${lead.first_name}, thanks for your interest! I'd love to help you find the right vehicle. What's most important to you — price, mileage, or features? — ${$env.SALESPERSON_NAME}`,\n    intent_score: 'cold',\n    intent_reasoning: 'Fallback: Claude response could not be parsed'\n  };\n}\n\nconst demoMode = lead.demo_mode === true;\nconst smsText = demoMode ? `[DEMO] ${parsed.sms_text}` : parsed.sms_text;\n\nreturn {\n  json: {\n    lead,\n    sms_text: smsText,\n    intent_score: parsed.intent_score,\n    intent_reasoning: parsed.intent_reasoning,\n    demo_mode: demoMode\n  }\n};"
+      }
+    },
+    {
+      "id": "if-demo",
+      "name": "Demo Mode?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1360, 380],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-demo",
+              "leftValue": "={{ $json.demo_mode }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "noop-demo-skip",
+      "name": "Skip SMS (Demo)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1580, 260],
+      "parameters": {}
+    },
+    {
+      "id": "http-twilio",
+      "name": "Send Twilio SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1580, 500],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.TWILIO_ACCOUNT_SID + ':' + $env.TWILIO_AUTH_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type", "value": "application/x-www-form-urlencoded" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "From", "value": "={{ $env.TWILIO_FROM_NUMBER }}" },
+            { "name": "To", "value": "={{ $json.lead.phone }}" },
+            { "name": "Body", "value": "={{ $json.sms_text }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-log-sms",
+      "name": "Log to sms_log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1800, 380],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ lead_id: $('Parse Claude Response').first().json.lead.id, direction: 'outbound', body: $('Parse Claude Response').first().json.sms_text, trigger_type: $('Build Claude Prompt').first().json.triggerType, demo: $('Parse Claude Response').first().json.demo_mode }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "code-next-followup",
+      "name": "Calc Next Follow-up",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2020, 380],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const lead = $('Parse Claude Response').first().json.lead;\nconst intentScore = $('Parse Claude Response').first().json.intent_score;\nconst triggerType = $('Build Claude Prompt').first().json.triggerType;\n\n// Days until next follow-up per sequence step\nconst followUpDays = { 0: 3, 1: 4, 2: 7, 3: 16, 4: null };\nconst nextStep = (lead.sequence_step || 0) + 1;\nconst daysUntilNext = followUpDays[lead.sequence_step || 0];\n\nlet nextFollowUp = null;\nif (daysUntilNext !== null && intentScore !== 'hot') {\n  const d = new Date();\n  d.setDate(d.getDate() + daysUntilNext);\n  nextFollowUp = d.toISOString();\n}\n\n// Map intent score to stage\nconst stageMap = { hot: 'hot', warm: 'warm', cold: lead.stage === 'new' ? 'contacted' : lead.stage };\nconst newStage = stageMap[intentScore] || lead.stage;\n\nreturn {\n  json: {\n    lead_id: lead.id,\n    intent_score: intentScore,\n    stage: newStage,\n    sequence_step: nextStep,\n    sms_count: (lead.sms_count || 0) + 1,\n    last_sms_at: new Date().toISOString(),\n    next_follow_up: nextFollowUp\n  }\n};"
+      }
+    },
+    {
+      "id": "http-update-lead",
+      "name": "Update Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2240, 380],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ intent_score: $json.intent_score, stage: $json.stage, sequence_step: $json.sequence_step, sms_count: $json.sms_count, last_sms_at: $json.last_sms_at, next_follow_up: $json.next_follow_up }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "if-hot",
+      "name": "Is Hot Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2460, 380],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-hot",
+              "leftValue": "={{ $('Parse Claude Response').first().json.intent_score }}",
+              "rightValue": "hot",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "http-trigger-wf05",
+      "name": "Trigger Hot Lead Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2680, 280],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_HOT_LEAD }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ lead_id: $('Calc Next Follow-up').first().json.lead_id }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "noop-not-hot",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2680, 480],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "SMS Engine Webhook": {
+      "main": [
+        [
+          { "node": "Get Lead", "type": "main", "index": 0 },
+          { "node": "Get Inventory", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Get Lead": {
+      "main": [[{ "node": "Build Claude Prompt", "type": "main", "index": 0 }]]
+    },
+    "Get Inventory": {
+      "main": [[{ "node": "Build Claude Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build Claude Prompt": {
+      "main": [[{ "node": "Call Claude API", "type": "main", "index": 0 }]]
+    },
+    "Call Claude API": {
+      "main": [[{ "node": "Parse Claude Response", "type": "main", "index": 0 }]]
+    },
+    "Parse Claude Response": {
+      "main": [[{ "node": "Demo Mode?", "type": "main", "index": 0 }]]
+    },
+    "Demo Mode?": {
+      "main": [
+        [{ "node": "Skip SMS (Demo)", "type": "main", "index": 0 }],
+        [{ "node": "Send Twilio SMS", "type": "main", "index": 0 }]
+      ]
+    },
+    "Skip SMS (Demo)": {
+      "main": [[{ "node": "Log to sms_log", "type": "main", "index": 0 }]]
+    },
+    "Send Twilio SMS": {
+      "main": [[{ "node": "Log to sms_log", "type": "main", "index": 0 }]]
+    },
+    "Log to sms_log": {
+      "main": [[{ "node": "Calc Next Follow-up", "type": "main", "index": 0 }]]
+    },
+    "Calc Next Follow-up": {
+      "main": [[{ "node": "Update Lead", "type": "main", "index": 0 }]]
+    },
+    "Update Lead": {
+      "main": [[{ "node": "Is Hot Lead?", "type": "main", "index": 0 }]]
+    },
+    "Is Hot Lead?": {
+      "main": [
+        [{ "node": "Trigger Hot Lead Alert", "type": "main", "index": 0 }],
+        [{ "node": "Done", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "notes": "Core SMS engine. Called by WF01 (first_contact) and WF04 (follow-up sequence). Fetches lead + inventory, generates SMS via Claude Haiku, skips Twilio if demo_mode=true, logs to sms_log, updates lead record, triggers WF05 if intent=hot." }
+}
