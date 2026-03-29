@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 
@@ -22,15 +22,21 @@ export default function LeadDetail() {
   const [newNote, setNewNote] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const currentUserRef = useRef(null);
 
-  useEffect(() => { fetchAll(); }, [id]);
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      currentUserRef.current = session?.user?.id || null;
+    });
+    fetchAll();
+  }, [id]);
 
   async function fetchAll() {
     setLoading(true);
     const [leadRes, msgRes, noteRes] = await Promise.all([
       supabase.from("leads").select("*").eq("id", id).single(),
       supabase.from("sms_log").select("*").eq("lead_id", id).order("sent_at", { ascending: true }),
-      supabase.from("notes").select("*").eq("lead_id", id).order("created_at", { ascending: false }),
+      supabase.from("notes").select("*, profiles(full_name)").eq("lead_id", id).order("created_at", { ascending: false }),
     ]);
     if (leadRes.data) setLead(leadRes.data);
     if (msgRes.data) setMessages(msgRes.data);
@@ -47,7 +53,7 @@ export default function LeadDetail() {
     e.preventDefault();
     if (!newNote.trim()) return;
     setSaving(true);
-    const { data } = await supabase.from("notes").insert({ lead_id: id, content: newNote.trim() }).select().single();
+    const { data } = await supabase.from("notes").insert({ lead_id: id, content: newNote.trim(), created_by: currentUserRef.current }).select("*, profiles(full_name)").single();
     if (data) setNotes([data, ...notes]);
     setNewNote("");
     setSaving(false);
@@ -172,7 +178,10 @@ export default function LeadDetail() {
             {notes.map((note) => (
               <div key={note.id} className="rounded-lg px-3.5 py-2.5" style={{ backgroundColor: "#f8fafc", border: "1px solid #f1f5f9" }}>
                 <p className="text-sm" style={{ color: "#0f172a" }}>{note.content}</p>
-                <p className="text-xs mt-1" style={{ color: "#94a3b8" }}>{new Date(note.created_at).toLocaleString()}</p>
+                <p className="text-xs mt-1" style={{ color: "#94a3b8" }}>
+                  {note.profiles?.full_name && <span className="font-medium" style={{ color: "#64748b" }}>{note.profiles.full_name} · </span>}
+                  {new Date(note.created_at).toLocaleString()}
+                </p>
               </div>
             ))}
           </div>

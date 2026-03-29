@@ -5,6 +5,7 @@ import Leads from "./pages/Leads";
 import LeadDetail from "./pages/LeadDetail";
 import Pipeline from "./pages/Pipeline";
 import Dashboard from "./pages/Dashboard";
+import Inventory from "./pages/Inventory";
 import Login from "./pages/Login";
 
 const NAV_ITEMS = [
@@ -32,6 +33,18 @@ const NAV_ITEMS = [
     ),
   },
   {
+    to: "/inventory",
+    label: "Inventory",
+    icon: (
+      <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+        <rect x="1" y="3" width="15" height="13" rx="1" />
+        <path d="M16 8h4l3 5v3h-7V8z" />
+        <circle cx="5.5" cy="18.5" r="2.5" />
+        <circle cx="18.5" cy="18.5" r="2.5" />
+      </svg>
+    ),
+  },
+  {
     to: "/dashboard",
     label: "Dashboard",
     icon: (
@@ -45,8 +58,9 @@ const NAV_ITEMS = [
   },
 ];
 
-function Sidebar({ userEmail }) {
-  const initial = (userEmail || "S")[0].toUpperCase();
+function Sidebar({ profile, userEmail }) {
+  const displayName = profile?.full_name || userEmail?.split("@")[0] || "User";
+  const initial = displayName[0].toUpperCase();
 
   async function handleLogout() {
     await supabase.auth.signOut();
@@ -103,9 +117,14 @@ function Sidebar({ userEmail }) {
             <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold text-white shrink-0" style={{ backgroundColor: "#1e3a5f" }}>
               {initial}
             </div>
-            <p className="text-xs font-medium truncate max-w-24" style={{ color: "#cbd5e1" }}>
-              {userEmail || "Sleiman M."}
-            </p>
+            <div>
+              <p className="text-xs font-medium truncate max-w-24" style={{ color: "#cbd5e1" }}>
+                {displayName}
+              </p>
+              {profile?.role && (
+                <p className="text-xs capitalize" style={{ color: "#475569" }}>{profile.role}</p>
+              )}
+            </div>
           </div>
           <button
             onClick={handleLogout}
@@ -129,20 +148,34 @@ function Sidebar({ userEmail }) {
 
 export default function App() {
   const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
-      setLoading(false);
+      if (session) fetchProfile(session.user.id);
+      else setLoading(false);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
+      if (session) fetchProfile(session.user.id);
+      else setProfile(null);
     });
 
     return () => subscription.unsubscribe();
   }, []);
+
+  async function fetchProfile(userId) {
+    const { data } = await supabase
+      .from("profiles")
+      .select("full_name, role")
+      .eq("id", userId)
+      .single();
+    setProfile(data || null);
+    setLoading(false);
+  }
 
   if (loading) {
     return (
@@ -157,13 +190,14 @@ export default function App() {
   return (
     <BrowserRouter>
       <div className="flex min-h-screen" style={{ backgroundColor: "#f1f5f9" }}>
-        <Sidebar userEmail={session.user?.email} />
+        <Sidebar profile={profile} userEmail={session.user?.email} />
         <main className="flex-1 overflow-auto">
           <Routes>
             <Route path="/" element={<Navigate to="/leads" replace />} />
             <Route path="/leads" element={<Leads />} />
             <Route path="/leads/:id" element={<LeadDetail />} />
             <Route path="/pipeline" element={<Pipeline />} />
+            <Route path="/inventory" element={<Inventory />} />
             <Route path="/dashboard" element={<Dashboard />} />
           </Routes>
         </main>
