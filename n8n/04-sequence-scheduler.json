@@ -1,0 +1,211 @@
+{
+  "name": "04 — Sequence Scheduler",
+  "nodes": [
+    {
+      "id": "sched-trigger",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+        }
+      }
+    },
+    {
+      "id": "http-get-due-leads",
+      "name": "Get Due Leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?next_follow_up=lte.{{ new Date().toISOString() }}&opted_out=eq.false&stage=not.in.(hot,closed,unsubscribed)&select=id,sequence_step,stage&order=next_follow_up.asc&limit=50",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-has-leads",
+      "name": "Any Leads Due?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-has-leads",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "noop-none-due",
+      "name": "No Leads Due",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 200],
+      "parameters": {}
+    },
+    {
+      "id": "split-leads",
+      "name": "Split Into Leads",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [900, 400],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "code-map-trigger",
+      "name": "Map Step to Trigger Type",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 400],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const lead = $json;\nconst step = lead.sequence_step || 0;\n\nconst SEQUENCE_MAP = {\n  0: 'first_contact',\n  1: 'follow_up_day3',\n  2: 'follow_up_day7',\n  3: 'follow_up_day14',\n  4: 'follow_up_day30'\n};\n\nconst triggerType = SEQUENCE_MAP[step];\nconst isSequenceComplete = step >= 5;\n\nreturn {\n  json: {\n    lead_id: lead.id,\n    sequence_step: step,\n    trigger_type: triggerType,\n    is_complete: isSequenceComplete\n  }\n};"
+      }
+    },
+    {
+      "id": "if-sequence-done",
+      "name": "Sequence Complete?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 400],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-complete",
+              "leftValue": "={{ $json.is_complete }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "http-mark-closed",
+      "name": "Mark Sequence Closed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 280],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\"stage\": \"closed\", \"next_follow_up\": null}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-trigger-wf02",
+      "name": "Trigger AI SMS Engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 520],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_SMS_ENGINE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ lead_id: $json.lead_id, trigger_type: $json.trigger_type }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-clear-followup",
+      "name": "Clear next_follow_up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 520],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $('Map Step to Trigger Type').item.json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\"next_follow_up\": null}",
+        "options": {},
+        "notes": "Clear next_follow_up immediately to prevent double-firing before WF02 sets the next one"
+      }
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [[{ "node": "Get Due Leads", "type": "main", "index": 0 }]]
+    },
+    "Get Due Leads": {
+      "main": [[{ "node": "Any Leads Due?", "type": "main", "index": 0 }]]
+    },
+    "Any Leads Due?": {
+      "main": [
+        [{ "node": "No Leads Due", "type": "main", "index": 0 }],
+        [{ "node": "Split Into Leads", "type": "main", "index": 0 }]
+      ]
+    },
+    "Split Into Leads": {
+      "main": [[{ "node": "Map Step to Trigger Type", "type": "main", "index": 0 }]]
+    },
+    "Map Step to Trigger Type": {
+      "main": [[{ "node": "Sequence Complete?", "type": "main", "index": 0 }]]
+    },
+    "Sequence Complete?": {
+      "main": [
+        [{ "node": "Mark Sequence Closed", "type": "main", "index": 0 }],
+        [{ "node": "Trigger AI SMS Engine", "type": "main", "index": 0 }]
+      ]
+    },
+    "Trigger AI SMS Engine": {
+      "main": [[{ "node": "Clear next_follow_up", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "notes": "Runs every 15 minutes. Queries Supabase for leads where next_follow_up <= now and opted_out=false and stage not in (hot, closed, unsubscribed). For each due lead, maps sequence_step to trigger_type and fires WF02. Marks sequence as closed after step 5. Clears next_follow_up immediately after firing to prevent double-trigger." }
+}

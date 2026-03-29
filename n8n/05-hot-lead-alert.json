@@ -1,0 +1,197 @@
+{
+  "name": "05 — Hot Lead Alert",
+  "nodes": [
+    {
+      "id": "wh-hot",
+      "name": "Hot Lead Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "parameters": {
+        "path": "hot-lead-alert",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-get-lead-hot",
+      "name": "Get Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $json.lead_id }}&select=*&limit=1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-already-alerted",
+      "name": "Already Alerted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-alerted",
+              "leftValue": "={{ ($json[0] || $json).salesperson_alerted }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "noop-already-done",
+      "name": "Skip — Already Alerted",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 200],
+      "parameters": {}
+    },
+    {
+      "id": "http-get-convo",
+      "name": "Get Conversation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 400],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log?lead_id=eq.{{ ($json[0] || $json).id }}&order=sent_at.desc&limit=5&select=direction,body,sent_at",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "code-build-alert",
+      "name": "Build Alert Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 400],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const lead = $('Get Lead').first().json[0] || $('Get Lead').first().json;\nconst messages = $('Get Conversation').all().map(i => i.json).reverse();\n\nconst convoLog = messages.map(m => {\n  const dir = m.direction === 'inbound' ? 'LEAD' : 'US';\n  const ts = new Date(m.sent_at).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });\n  return `[${ts}] ${dir}: ${m.body}`;\n}).join('\\n');\n\nconst smsAlert = `HOT LEAD: ${lead.first_name} ${lead.last_name} — ${lead.vehicle_interest || 'Vehicle TBD'} — ${lead.phone}`;\n\nconst emailSubject = `HOT LEAD: ${lead.first_name} ${lead.last_name}`;\nconst emailBody = `New hot lead detected at ${new Date().toLocaleString('en-CA')}\\n\\n` +\n  `Name: ${lead.first_name} ${lead.last_name}\\n` +\n  `Phone: ${lead.phone}\\n` +\n  `Email: ${lead.email || '(none)'}\\n` +\n  `Vehicle Interest: ${lead.vehicle_interest || '(not specified)'}\\n` +\n  `Source: ${lead.source}\\n\\n` +\n  `--- Recent Conversation ---\\n${convoLog || '(no messages yet)'}\\n\\n` +\n  `View in CRM: ${$env.APP_URL || 'https://your-dealercrm-url.vercel.app'}/leads/${lead.id}`;\n\nreturn [{\n  json: {\n    lead_id: lead.id,\n    lead,\n    sms_alert: smsAlert,\n    email_subject: emailSubject,\n    email_body: emailBody\n  }\n}];"
+      }
+    },
+    {
+      "id": "http-sms-salesperson",
+      "name": "SMS Salesperson",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.TWILIO_ACCOUNT_SID + ':' + $env.TWILIO_AUTH_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type", "value": "application/x-www-form-urlencoded" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "From", "value": "={{ $env.TWILIO_FROM_NUMBER }}" },
+            { "name": "To", "value": "={{ $env.SALESPERSON_PHONE }}" },
+            { "name": "Body", "value": "={{ $json.sms_alert }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "email-salesperson",
+      "name": "Email Salesperson",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1340, 500],
+      "parameters": {
+        "fromEmail": "={{ $env.SALESPERSON_EMAIL }}",
+        "toEmail": "={{ $env.SALESPERSON_EMAIL }}",
+        "subject": "={{ $json.email_subject }}",
+        "text": "={{ $json.email_body }}",
+        "options": {}
+      },
+      "notes": "Configure SMTP credentials in n8n → Credentials → SMTP. Or replace this node with a Gmail or SendGrid node if preferred."
+    },
+    {
+      "id": "http-mark-alerted",
+      "name": "Mark Salesperson Alerted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 400],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $('Build Alert Message').first().json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\"salesperson_alerted\": true, \"stage\": \"hot\"}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Hot Lead Webhook": {
+      "main": [[{ "node": "Get Lead", "type": "main", "index": 0 }]]
+    },
+    "Get Lead": {
+      "main": [[{ "node": "Already Alerted?", "type": "main", "index": 0 }]]
+    },
+    "Already Alerted?": {
+      "main": [
+        [{ "node": "Skip — Already Alerted", "type": "main", "index": 0 }],
+        [{ "node": "Get Conversation", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Conversation": {
+      "main": [[{ "node": "Build Alert Message", "type": "main", "index": 0 }]]
+    },
+    "Build Alert Message": {
+      "main": [
+        [
+          { "node": "SMS Salesperson", "type": "main", "index": 0 },
+          { "node": "Email Salesperson", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "SMS Salesperson": {
+      "main": [[{ "node": "Mark Salesperson Alerted", "type": "main", "index": 0 }]]
+    },
+    "Email Salesperson": {
+      "main": [[{ "node": "Mark Salesperson Alerted", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "notes": "Triggered by WF02 and WF03 when intent_score=hot. Deduplicates via salesperson_alerted flag. Sends SMS + email to salesperson with lead info and conversation log. Email node requires SMTP credentials configured in n8n — or swap for Gmail/SendGrid node. Set APP_URL env var for the CRM deep link in the email." }
+}

@@ -1,8 +1,11 @@
+import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from "react-router-dom";
+import { supabase } from "./lib/supabase";
 import Leads from "./pages/Leads";
 import LeadDetail from "./pages/LeadDetail";
 import Pipeline from "./pages/Pipeline";
 import Dashboard from "./pages/Dashboard";
+import Login from "./pages/Login";
 
 const NAV_ITEMS = [
   {
@@ -42,7 +45,13 @@ const NAV_ITEMS = [
   },
 ];
 
-function Sidebar() {
+function Sidebar({ userEmail }) {
+  const initial = (userEmail || "S")[0].toUpperCase();
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+  }
+
   return (
     <aside className="w-56 shrink-0 flex flex-col h-screen sticky top-0" style={{ backgroundColor: "#0f172a" }}>
       {/* Logo */}
@@ -87,16 +96,31 @@ function Sidebar() {
         ))}
       </nav>
 
-      {/* User */}
+      {/* User + logout */}
       <div className="px-4 py-4 border-t" style={{ borderColor: "rgba(255,255,255,0.07)" }}>
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold text-white shrink-0" style={{ backgroundColor: "#1e3a5f" }}>
-            S
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold text-white shrink-0" style={{ backgroundColor: "#1e3a5f" }}>
+              {initial}
+            </div>
+            <p className="text-xs font-medium truncate max-w-24" style={{ color: "#cbd5e1" }}>
+              {userEmail || "Sleiman M."}
+            </p>
           </div>
-          <div>
-            <p className="text-xs font-medium" style={{ color: "#cbd5e1" }}>Sleiman M.</p>
-            <p className="text-xs" style={{ color: "#475569" }}>Sales Rep</p>
-          </div>
+          <button
+            onClick={handleLogout}
+            title="Sign out"
+            className="transition-colors"
+            style={{ color: "#475569" }}
+            onMouseEnter={e => e.currentTarget.style.color = "#94a3b8"}
+            onMouseLeave={e => e.currentTarget.style.color = "#475569"}
+          >
+            <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+              <polyline points="16 17 21 12 16 7" />
+              <line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+          </button>
         </div>
       </div>
     </aside>
@@ -104,10 +128,36 @@ function Sidebar() {
 }
 
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", backgroundColor: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: "24px", height: "24px", border: "2px solid #1e3a5f", borderTopColor: "#2563eb", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+      </div>
+    );
+  }
+
+  if (!session) return <Login />;
+
   return (
     <BrowserRouter>
       <div className="flex min-h-screen" style={{ backgroundColor: "#f1f5f9" }}>
-        <Sidebar />
+        <Sidebar userEmail={session.user?.email} />
         <main className="flex-1 overflow-auto">
           <Routes>
             <Route path="/" element={<Navigate to="/leads" replace />} />
