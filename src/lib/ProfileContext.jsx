@@ -1,5 +1,10 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useState } from "react";
 import { supabase } from "./supabase";
+import {
+  DEFAULT_SHIFT_TIMEZONE,
+  parseTimeInputToMinutes,
+} from "./shiftAssignments";
 
 const ProfileContext = createContext(null);
 
@@ -8,37 +13,57 @@ export function ProfileProvider({ user, children }) {
   const [profileLoading, setProfileLoading] = useState(true);
 
   useEffect(() => {
-    if (!user) { setProfileLoading(false); return; }
+    if (!user) return;
+
+    let cancelled = false;
 
     async function loadProfile() {
-      const { data } = await supabase
+      setProfileLoading(true);
+
+      const { data, error } = await supabase
         .from("profiles")
-        .select("*")
+        .select("id, full_name, phone, role, active, rr_order, suspended_at, created_at, shift_start_minutes, shift_end_minutes, shift_timezone")
         .eq("id", user.id)
         .single();
 
+      if (cancelled) return;
+
       if (data) {
         setProfile(data);
-      } else {
-        // Auto-create on first login with safe defaults
+      } else if (error?.code === "PGRST116") {
         const newProfile = {
           id: user.id,
-          name: user.email.split("@")[0],
+          full_name: user.user_metadata?.full_name || user.email.split("@")[0],
           role: "rep",
           active: true,
+          rr_order: 0,
+          shift_start_minutes: parseTimeInputToMinutes("09:00"),
+          shift_end_minutes: parseTimeInputToMinutes("17:00"),
+          shift_timezone: DEFAULT_SHIFT_TIMEZONE,
         };
         const { data: created } = await supabase
           .from("profiles")
           .insert(newProfile)
-          .select()
+          .select("id, full_name, phone, role, active, rr_order, suspended_at, created_at, shift_start_minutes, shift_end_minutes, shift_timezone")
           .single();
-        setProfile(created);
+        if (!cancelled) {
+          setProfile(created || null);
+        }
+      } else {
+        setProfile(null);
       }
-      setProfileLoading(false);
+
+      if (!cancelled) {
+        setProfileLoading(false);
+      }
     }
 
     loadProfile();
-  }, [user?.id]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   return (
     <ProfileContext.Provider value={{ profile, setProfile, profileLoading }}>
@@ -47,4 +72,6 @@ export function ProfileProvider({ user, children }) {
   );
 }
 
-export const useProfile = () => useContext(ProfileContext);
+export function useProfile() {
+  return useContext(ProfileContext);
+}

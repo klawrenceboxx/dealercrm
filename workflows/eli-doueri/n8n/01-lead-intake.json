@@ -16,7 +16,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Normalize incoming lead data from website form or Meta Lead Ads\nconst input = $input.first().json;\n\n// Normalize phone to E.164\nlet phone = (input.phone || input.phone_number || '').replace(/[^\\d+]/g, '');\nif (phone && !phone.startsWith('+')) {\n  // Assume North American if 10 digits\n  if (phone.length === 10) phone = '+1' + phone;\n  else if (phone.length === 11 && phone.startsWith('1')) phone = '+' + phone;\n}\n\nconst leadId = crypto.randomUUID();\n\nreturn [{\n  json: {\n    lead_id: leadId,\n    first_name: (input.first_name || input.name || 'Unknown').trim(),\n    last_name: (input.last_name || '').trim(),\n    phone: phone || null,\n    email: (input.email || '').trim() || null,\n    source: input.source === 'meta' ? 'meta' : 'website',\n    vehicle_interest: (input.vehicle_interest || input.vehicle || '').trim() || null,\n    stage: 'new',\n    intent_score: 'cold',\n    sequence_step: 0,\n    demo_mode: true,\n    next_follow_up: null,\n    opted_out: false,\n    salesperson_alerted: false,\n    sms_count: 0,\n    assigned_to: null\n  }\n}];"
+        "jsCode": "// Normalize incoming lead data from website form or Meta Lead Ads\nconst input = $input.first().json;\n\n// Normalize phone to E.164\nlet phone = (input.phone || input.phone_number || '').replace(/[^\\d+]/g, '');\nif (phone && !phone.startsWith('+')) {\n  // Assume North American if 10 digits\n  if (phone.length === 10) phone = '+1' + phone;\n  else if (phone.length === 11 && phone.startsWith('1')) phone = '+' + phone;\n}\n\nconst leadId = crypto.randomUUID();\nconst assignedAt = new Date().toISOString();\n\nreturn [{\n  json: {\n    lead_id: leadId,\n    first_name: (input.first_name || input.name || 'Unknown').trim(),\n    last_name: (input.last_name || '').trim(),\n    phone: phone || null,\n    email: (input.email || '').trim() || null,\n    source: input.source === 'meta' ? 'meta' : 'website',\n    vehicle_interest: (input.vehicle_interest || input.vehicle || '').trim() || null,\n    stage: 'new',\n    intent_score: 'cold',\n    sequence_step: 0,\n    demo_mode: true,\n    next_follow_up: null,\n    opted_out: false,\n    salesperson_alerted: false,\n    sms_count: 0,\n    autopilot_active: false,\n    assigned_at: assignedAt,\n    rep_response_at: null,\n    assigned_to: null,\n    _trigger_sms_immediately: false\n  }\n}];"
       },
       "id": "normalize",
       "name": "Normalize Lead Data",
@@ -84,7 +84,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Round-robin assignment\n// 1. Get active reps ordered by rr_order\n// 2. Get current rr_index from settings\n// 3. Assign and increment\n\nconst baseUrl = $env.SUPABASE_URL;\nconst key = $env.SUPABASE_SERVICE_ROLE_KEY;\nconst headers = {\n  'apikey': key,\n  'Authorization': `Bearer ${key}`,\n  'Content-Type': 'application/json',\n  'Prefer': 'return=representation'\n};\n\n// Get active reps\nconst repsRes = await fetch(`${baseUrl}/rest/v1/profiles?active=eq.true&order=rr_order.asc&select=id,name,rr_order`, { headers });\nconst reps = await repsRes.json();\n\nif (!reps || reps.length === 0) {\n  // No active reps, leave unassigned\n  return [{ json: { ...$input.first().json, assigned_to: null } }];\n}\n\n// Get rr_index\nconst settingsRes = await fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index&select=value`, { headers });\nconst settings = await settingsRes.json();\nconst currentIndex = settings[0]?.value ?? 0;\nconst idx = (typeof currentIndex === 'number' ? currentIndex : parseInt(currentIndex)) % reps.length;\n\nconst assignedRep = reps[idx];\nconst nextIndex = (idx + 1) % reps.length;\n\n// Update rr_index\nawait fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index`, {\n  method: 'PATCH',\n  headers: { ...headers, 'Prefer': 'return=minimal' },\n  body: JSON.stringify({ value: nextIndex })\n});\n\nreturn [{ json: { ...$input.first().json, assigned_to: assignedRep.id } }];"
+        "jsCode": "// Shift-aware round-robin assignment\nconst baseUrl = $env.SUPABASE_URL;\nconst key = $env.SUPABASE_SERVICE_ROLE_KEY;\nconst headers = {\n  'apikey': key,\n  'Authorization': `Bearer ${key}`,\n  'Content-Type': 'application/json',\n  'Prefer': 'return=representation'\n};\n\nfunction getMinutesInTimeZone(date, timeZone) {\n  const parts = new Intl.DateTimeFormat('en-CA', {\n    hour: '2-digit',\n    minute: '2-digit',\n    hour12: false,\n    timeZone: timeZone || 'America/Toronto'\n  }).formatToParts(date);\n\n  const hours = parseInt(parts.find(part => part.type === 'hour')?.value || '0', 10);\n  const minutes = parseInt(parts.find(part => part.type === 'minute')?.value || '0', 10);\n  return hours * 60 + minutes;\n}\n\nfunction isWorking(rep, date) {\n  if (!rep?.active) return false;\n  const start = Number(rep.shift_start_minutes);\n  const end = Number(rep.shift_end_minutes);\n  if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) return true;\n\n  const nowMinutes = getMinutesInTimeZone(date, rep.shift_timezone || 'America/Toronto');\n  if (start < end) {\n    return nowMinutes >= start && nowMinutes < end;\n  }\n\n  return nowMinutes >= start || nowMinutes < end;\n}\n\nconst repsRes = await fetch(`${baseUrl}/rest/v1/profiles?active=eq.true&select=id,name,rr_order,active,shift_start_minutes,shift_end_minutes,shift_timezone`, { headers });\nconst repsRaw = await repsRes.json();\nconst now = new Date();\nconst reps = (Array.isArray(repsRaw) ? repsRaw : [])\n  .filter(rep => isWorking(rep, now))\n  .sort((a, b) => {\n    const orderDiff = (a.rr_order ?? 0) - (b.rr_order ?? 0);\n    if (orderDiff !== 0) return orderDiff;\n    return (a.name || '').localeCompare(b.name || '');\n  });\n\nif (reps.length === 0) {\n  return [{ json: { ...$input.first().json, assigned_to: null, autopilot_active: true, _trigger_sms_immediately: true } }];\n}\n\nconst settingsRes = await fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index&select=value`, { headers });\nconst settings = await settingsRes.json();\nconst rawIndex = settings[0]?.value ?? 0;\nconst currentIndex = typeof rawIndex === 'number' ? rawIndex : parseInt(String(rawIndex).replace(/[^\\d-]/g, ''), 10) || 0;\nconst idx = ((currentIndex % reps.length) + reps.length) % reps.length;\nconst assignedRep = reps[idx];\nconst nextIndex = (idx + 1) % reps.length;\n\nawait fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index`, {\n  method: 'PATCH',\n  headers: { ...headers, 'Prefer': 'return=minimal' },\n  body: JSON.stringify({ value: nextIndex })\n});\n\nreturn [{ json: { ...$input.first().json, assigned_to: assignedRep.id, autopilot_active: false, _trigger_sms_immediately: false } }];"
       },
       "id": "round-robin",
       "name": "Round Robin Assign",
@@ -107,7 +107,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ lead_id: $json.lead_id, first_name: $json.first_name, last_name: $json.last_name, phone: $json.phone || null, email: $json.email || null, source: $json.source, vehicle_interest: $json.vehicle_interest || null, stage: 'new', intent_score: 'cold', sequence_step: 0, demo_mode: $json.demo_mode, opted_out: false, salesperson_alerted: false, sms_count: 0, assigned_to: $json.assigned_to || null }) }}",
+        "jsonBody": "={{ JSON.stringify({ lead_id: $json.lead_id, first_name: $json.first_name, last_name: $json.last_name, phone: $json.phone || null, email: $json.email || null, source: $json.source, vehicle_interest: $json.vehicle_interest || null, stage: 'new', intent_score: 'cold', sequence_step: 0, demo_mode: $json.demo_mode, opted_out: false, salesperson_alerted: false, sms_count: 0, autopilot_active: $json.autopilot_active, assigned_at: $json.assigned_at, rep_response_at: $json.rep_response_at, assigned_to: $json.assigned_to || null }) }}",
         "options": {}
       },
       "id": "insert-lead",
@@ -118,17 +118,12 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "={{ $env.N8N_WEBHOOK_SMS_ENGINE }}",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"lead_id\": \"{{ Array.isArray($json) ? $json[0].id : $json.id }}\",\n  \"trigger_type\": \"first_contact\"\n}",
-        "options": {}
+        "jsCode": "const insertedLead = $input.first().json;\nconst leadId = Array.isArray(insertedLead) ? insertedLead[0]?.id : insertedLead?.id;\nconst assignedLead = $('Round Robin Assign').first().json;\n\nif (!leadId || !assignedLead?._trigger_sms_immediately) {\n  return [{ json: insertedLead }];\n}\n\nawait fetch($env.N8N_WEBHOOK_SMS_ENGINE, {\n  method: 'POST',\n  headers: { 'Content-Type': 'application/json' },\n  body: JSON.stringify({ lead_id: leadId, trigger_type: 'first_contact' })\n});\n\nreturn [{ json: insertedLead }];"
       },
       "id": "trigger-sms-engine",
       "name": "Trigger WF02 SMS Engine",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [1760, 200]
     },
     {

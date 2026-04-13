@@ -6,8 +6,15 @@
 -- Linked to auth.users. Auto-created on signup via trigger below.
 create table if not exists profiles (
   id         uuid references auth.users(id) on delete cascade primary key,
+  name       text,
   full_name  text,
-  role       text check (role in ('admin', 'sales')) default 'sales',
+  phone      text,
+  role       text check (role in ('admin', 'sales', 'manager', 'rep')) default 'rep',
+  active     boolean default true,
+  rr_order   integer default 0,
+  shift_start_minutes integer default 540,
+  shift_end_minutes integer default 1020,
+  shift_timezone text default 'America/Toronto',
   created_at timestamptz default now()
 );
 
@@ -15,9 +22,10 @@ create table if not exists profiles (
 create or replace function handle_new_user()
 returns trigger as $$
 begin
-  insert into profiles (id, full_name)
+  insert into profiles (id, name, full_name)
   values (
     new.id,
+    coalesce(new.raw_user_meta_data->>'full_name', split_part(new.email, '@', 1)),
     coalesce(new.raw_user_meta_data->>'full_name', split_part(new.email, '@', 1))
   )
   on conflict (id) do nothing;
@@ -35,6 +43,16 @@ create policy "users can view all profiles" on profiles
   for select using (auth.role() = 'authenticated');
 create policy "users can update own profile" on profiles
   for update using (auth.uid() = id);
+
+create table if not exists settings (
+  key        text primary key,
+  value      jsonb not null default '0'::jsonb,
+  updated_at timestamptz default now()
+);
+
+insert into settings (key, value)
+values ('rr_index', '0'::jsonb)
+on conflict (key) do nothing;
 
 -- ── Leads ──────────────────────────────────────────────────────────────────
 create table if not exists leads (
@@ -57,8 +75,11 @@ create table if not exists leads (
   opted_out      boolean default false,
   salesperson_alerted boolean default false,
   demo_mode      boolean default true,        -- set to false when going live
+  autopilot_active boolean default true,
   notes          text,
   assigned_to    uuid references profiles(id), -- which sales rep owns this lead
+  assigned_at    timestamptz,
+  rep_response_at timestamptz,
   created_at     timestamptz default now()
 );
 
@@ -66,6 +87,8 @@ create index if not exists leads_next_follow_up_idx on leads (next_follow_up)
   where opted_out = false and stage not in ('hot', 'closed', 'unsubscribed');
 create index if not exists leads_phone_idx on leads (phone);
 create index if not exists leads_assigned_to_idx on leads (assigned_to);
+create index if not exists leads_assigned_at_idx on leads (assigned_at);
+create index if not exists leads_rep_response_at_idx on leads (rep_response_at);
 
 -- ── SMS Log ────────────────────────────────────────────────────────────────
 create table if not exists sms_log (

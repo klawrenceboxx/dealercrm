@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 
 const STATUS_STYLES = {
@@ -43,9 +43,7 @@ export default function Inventory() {
   const [saveError, setSaveError] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
 
-  useEffect(() => { fetchInventory(); }, []);
-
-  async function fetchInventory() {
+  const fetchInventory = useCallback(async () => {
     setLoading(true);
     const { data } = await supabase
       .from("inventory")
@@ -53,7 +51,11 @@ export default function Inventory() {
       .order("updated_at", { ascending: false });
     setInventory(data || []);
     setLoading(false);
-  }
+  }, []);
+
+  useEffect(() => {
+    Promise.resolve().then(fetchInventory);
+  }, [fetchInventory]);
 
   async function handleVinLookup() {
     if (!form.vin) return;

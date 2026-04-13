@@ -1,7 +1,23 @@
-import { useEffect, useState } from "react";
-import { UserCheck, Phone, Shield, User, ToggleLeft, ToggleRight, Edit2, X, Check } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Clock3, Edit2, Phone, Shield, User, X } from "lucide-react";
 import { supabase } from "../lib/supabase";
 import { useProfile } from "../lib/ProfileContext";
+import {
+  DEFAULT_SHIFT_TIMEZONE,
+  formatMinutesAsTimeInput,
+  formatShiftWindow,
+  isRepWorking,
+  parseTimeInputToMinutes,
+  sortRoundRobinReps,
+} from "../lib/shiftAssignments";
+
+function getMemberName(member) {
+  return member?.name || member?.full_name || "Unnamed rep";
+}
+
+function getMemberInitial(member) {
+  return getMemberName(member).charAt(0).toUpperCase();
+}
 
 function RoleBadge({ role }) {
   return role === "manager" ? (
@@ -17,23 +33,38 @@ function RoleBadge({ role }) {
   );
 }
 
-function EditModal({ member, leadCount, onClose, onSave }) {
+function EditModal({ member, onClose, onSave }) {
   const [form, setForm] = useState({
-    name: member.name,
+    name: getMemberName(member),
     phone: member.phone || "",
-    role: member.role,
-    active: member.active,
+    role: member.role || "rep",
+    active: member.active ?? true,
     rr_order: member.rr_order ?? 0,
+    shift_start_minutes: member.shift_start_minutes ?? parseTimeInputToMinutes("09:00"),
+    shift_end_minutes: member.shift_end_minutes ?? parseTimeInputToMinutes("17:00"),
+    shift_timezone: member.shift_timezone || DEFAULT_SHIFT_TIMEZONE,
   });
   const [saving, setSaving] = useState(false);
 
   async function handleSave() {
     setSaving(true);
+    const cleanName = form.name.trim();
+
     const { data } = await supabase
       .from("profiles")
-      .update(form)
+      .update({
+        name: cleanName,
+        full_name: cleanName,
+        phone: form.phone.trim() || null,
+        role: form.role,
+        active: form.active,
+        rr_order: form.rr_order,
+        shift_start_minutes: form.shift_start_minutes,
+        shift_end_minutes: form.shift_end_minutes,
+        shift_timezone: form.shift_timezone,
+      })
       .eq("id", member.id)
-      .select()
+      .select("*")
       .single();
     if (data) onSave(data);
     setSaving(false);
@@ -89,7 +120,33 @@ function EditModal({ member, leadCount, onClose, onSave }) {
               onChange={(e) => setForm({ ...form, rr_order: parseInt(e.target.value) || 0 })}
               className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
-            <p className="text-xs text-slate-400 mt-1">Lower number = assigned first. Reps with same order rotate alphabetically.</p>
+            <p className="text-xs text-slate-400 mt-1">Lower number gets first pass whenever multiple reps overlap on shift.</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 mb-1.5">Punch in</label>
+              <input
+                type="time"
+                value={formatMinutesAsTimeInput(form.shift_start_minutes)}
+                onChange={(e) => setForm({
+                  ...form,
+                  shift_start_minutes: parseTimeInputToMinutes(e.target.value) ?? form.shift_start_minutes,
+                })}
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 mb-1.5">Punch out</label>
+              <input
+                type="time"
+                value={formatMinutesAsTimeInput(form.shift_end_minutes)}
+                onChange={(e) => setForm({
+                  ...form,
+                  shift_end_minutes: parseTimeInputToMinutes(e.target.value) ?? form.shift_end_minutes,
+                })}
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
           </div>
           <label className="flex items-center gap-3 cursor-pointer">
             <span className="text-sm font-medium text-slate-700">Active</span>
@@ -99,7 +156,7 @@ function EditModal({ member, leadCount, onClose, onSave }) {
             >
               <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${form.active ? "translate-x-4" : "translate-x-0"}`} />
             </div>
-            <span className="text-xs text-slate-400">{form.active ? "Gets assigned leads" : "Excluded from rotation"}</span>
+            <span className="text-xs text-slate-400">{form.active ? "Eligible when punched in" : "Excluded from rotation"}</span>
           </label>
         </div>
         <div className="flex gap-3 mt-6">
@@ -122,6 +179,85 @@ function EditModal({ member, leadCount, onClose, onSave }) {
   );
 }
 
+function MemberCard({ currentProfile, isManager, leadCounts, member, onEdit }) {
+  const onShift = isRepWorking(member);
+
+  return (
+    <div className={`bg-white rounded-xl border px-5 py-4 flex items-center justify-between gap-4 ${member.active ? "border-slate-200" : "border-slate-100 opacity-70"}`}>
+      <div className="flex items-center gap-4 min-w-0">
+        <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center shrink-0 text-slate-600 font-semibold text-sm">
+          {getMemberInitial(member)}
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-semibold text-slate-900 text-sm">{getMemberName(member)}</span>
+            <RoleBadge role={member.role} />
+            <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${onShift ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+              {onShift ? "On shift" : "Off shift"}
+            </span>
+            {member.id === currentProfile?.id && (
+              <span className="text-xs text-slate-400">(you)</span>
+            )}
+          </div>
+          <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+            {member.phone && (
+              <span className="text-xs text-slate-400 flex items-center gap-1">
+                <Phone size={10} />
+                {member.phone}
+              </span>
+            )}
+            <span className="text-xs text-slate-400">
+              {leadCounts[member.id] || 0} lead{(leadCounts[member.id] || 0) !== 1 ? "s" : ""} assigned
+            </span>
+            <span className="text-xs text-slate-300">order: {member.rr_order ?? 0}</span>
+            <span className="text-xs text-slate-400 flex items-center gap-1">
+              <Clock3 size={10} />
+              {formatShiftWindow(member.shift_start_minutes, member.shift_end_minutes)}
+            </span>
+          </div>
+        </div>
+      </div>
+      {isManager && (
+        <button
+          onClick={() => onEdit(member)}
+          className="shrink-0 p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+        >
+          <Edit2 size={15} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PunchRow({ isManager, member, onEdit }) {
+  const onShift = isRepWorking(member);
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 px-5 py-4 flex items-center justify-between gap-4">
+      <div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-semibold text-slate-900 text-sm">{getMemberName(member)}</span>
+          <RoleBadge role={member.role} />
+          <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${onShift ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+            {onShift ? "Working now" : "Outside shift"}
+          </span>
+        </div>
+        <p className="text-xs text-slate-500 mt-1">
+          {member.active ? formatShiftWindow(member.shift_start_minutes, member.shift_end_minutes) : "Inactive rep"}
+        </p>
+      </div>
+      {isManager && (
+        <button
+          onClick={() => onEdit(member)}
+          className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+        >
+          Edit shift
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function Team() {
   const { profile: currentProfile } = useProfile();
   const [members, setMembers] = useState([]);
@@ -134,10 +270,10 @@ export default function Team() {
   useEffect(() => {
     async function fetchData() {
       const [profilesRes, leadsRes] = await Promise.all([
-        supabase.from("profiles").select("*").order("rr_order").order("name"),
+        supabase.from("profiles").select("*"),
         supabase.from("leads").select("assigned_to").not("assigned_to", "is", null),
       ]);
-      setMembers(profilesRes.data || []);
+      setMembers(sortRoundRobinReps(profilesRes.data || []));
 
       // Count leads per rep
       const counts = {};
@@ -151,10 +287,13 @@ export default function Team() {
   }, []);
 
   function handleSaved(updated) {
-    setMembers((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+    setMembers((prev) => sortRoundRobinReps(prev.map((member) => (member.id === updated.id ? updated : member))));
     setEditing(null);
   }
 
+  const sortedMembers = useMemo(() => sortRoundRobinReps(members), [members]);
+  const active = sortedMembers.filter((member) => member.active);
+  const inactive = sortedMembers.filter((member) => !member.active);
   if (loading) return (
     <div className="p-6">
       <div className="h-7 w-24 bg-slate-100 rounded animate-pulse mb-6" />
@@ -165,9 +304,6 @@ export default function Team() {
       </div>
     </div>
   );
-
-  const active = members.filter((m) => m.active);
-  const inactive = members.filter((m) => !m.active);
 
   return (
     <div className="p-6 max-w-2xl">

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ChevronLeft, ChevronRight, Clock, CalendarDays } from "lucide-react";
 import { supabase } from "../lib/supabase";
@@ -24,9 +24,7 @@ export default function Schedule() {
   const [weekOffset, setWeekOffset] = useState(0);
   const navigate = useNavigate();
 
-  useEffect(() => { fetchData(); }, [weekOffset]);
-
-  async function fetchData() {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     const start = new Date();
     start.setDate(start.getDate() + weekOffset * 7 - start.getDay() + 1); // Monday
@@ -41,15 +39,19 @@ export default function Schedule() {
         .gte("scheduled_at", start.toISOString())
         .lt("scheduled_at", end.toISOString())
         .order("scheduled_at"),
-      supabase.from("profiles").select("id, name"),
+      supabase.from("profiles").select("id, name, full_name"),
     ]);
 
     setAppointments(apptRes.data || []);
     const pMap = {};
-    (profileRes.data || []).forEach((p) => { pMap[p.id] = p.name; });
+    (profileRes.data || []).forEach((p) => { pMap[p.id] = p.name || p.full_name; });
     setProfiles(pMap);
     setLoading(false);
-  }
+  }, [weekOffset]);
+
+  useEffect(() => {
+    Promise.resolve().then(fetchData);
+  }, [fetchData]);
 
   // Build week days (Mon–Sun)
   const weekStart = new Date();

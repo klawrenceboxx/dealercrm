@@ -1,0 +1,177 @@
+{
+  "name": "[07] Resend Email Tracking",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "resend-email-events",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 260]
+    },
+    {
+      "parameters": {
+        "jsCode": "const request = $input.first().json;\nconst payload = request.body || request;\nconst headers = request.headers || {};\n\nconst supportedEvents = {\n  'email.opened': 'email_opened',\n  'email.clicked': 'email_clicked'\n};\n\nconst rawEventType = payload.type || payload.event || '';\nconst mappedEventType = supportedEvents[rawEventType];\nif (!mappedEventType) {\n  return [{ json: { _skip: true, status: 'ignored', reason: 'unsupported_event', raw_event_type: rawEventType || null } }];\n}\n\nconst resendMessageId = payload.data?.email_id || payload.data?.emailId || payload.data?.id || null;\nif (!resendMessageId) {\n  return [{ json: { _skip: true, status: 'ignored', reason: 'missing_resend_message_id', raw_event_type: rawEventType } }];\n}\n\nconst externalEventId = headers['svix-id'] || headers['webhook-id'] || null;\nconst baseUrl = $env.SUPABASE_URL;\nconst serviceKey = $env.SUPABASE_SERVICE_ROLE_KEY;\nconst supabaseHeaders = {\n  apikey: serviceKey,\n  Authorization: `Bearer ${serviceKey}`\n};\n\nif (externalEventId) {\n  const duplicateRes = await fetch(`${baseUrl}/rest/v1/activity_log?select=id&external_event_id=eq.${encodeURIComponent(externalEventId)}&limit=1`, {\n    headers: supabaseHeaders\n  });\n  const duplicateRows = await duplicateRes.json();\n  if (Array.isArray(duplicateRows) && duplicateRows.length > 0) {\n    return [{ json: { _skip: true, status: 'duplicate', reason: 'external_event_id_exists', external_event_id: externalEventId } }];\n  }\n}\n\nconst emailSendRes = await fetch(`${baseUrl}/rest/v1/activity_log?select=lead_id,company_id,resend_message_id&event_type=eq.ai_auto_reply_sent&resend_message_id=eq.${encodeURIComponent(resendMessageId)}&order=created_at.desc&limit=1`, {\n  headers: supabaseHeaders\n});\nconst emailSendRows = await emailSendRes.json();\nif (!Array.isArray(emailSendRows) || emailSendRows.length === 0) {\n  return [{ json: { _skip: true, status: 'ignored', reason: 'matching_email_not_found', resend_message_id: resendMessageId } }];\n}\n\nconst sourceRow = emailSendRows[0];\nconst occurredAt = payload.created_at || payload.data?.created_at || payload.data?.clicked_at || payload.data?.opened_at || new Date().toISOString();\n\nreturn [{\n  json: {\n    _skip: false,\n    status: 'ready',\n    lead_id: sourceRow.lead_id,\n    company_id: sourceRow.company_id,\n    event_type: mappedEventType,\n    resend_message_id: resendMessageId,\n    external_event_id: externalEventId,\n    occurred_at: occurredAt,\n    metadata: {\n      channel: 'email',\n      raw_event_type: rawEventType,\n      recipient: payload.data?.to || payload.data?.email || null,\n      link: payload.data?.url || payload.data?.link || null,\n      user_agent: payload.data?.user_agent || null,\n      ip_address: payload.data?.ip_address || null,\n      resend_payload_id: payload.data?.id || null\n    }\n  }\n}];"
+      },
+      "id": "resolve-event",
+      "name": "Resolve Event Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 260]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "skip-check",
+              "leftValue": "={{ $json._skip }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-skip",
+      "name": "Skip Event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [720, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/activity_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ lead_id: $json.lead_id, company_id: $json.company_id, actor_id: null, event_type: $json.event_type, resend_message_id: $json.resend_message_id, external_event_id: $json.external_event_id, metadata: $json.metadata, created_at: $json.occurred_at }) }}",
+        "options": {}
+      },
+      "id": "insert-activity",
+      "name": "Insert Email Activity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 340]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: $json.status || 'ignored', reason: $json.reason || null }) }}",
+        "options": {}
+      },
+      "id": "respond-skipped",
+      "name": "Respond Skipped",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [960, 140]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"ok\", \"event_type\": \"{{ $('Resolve Event Context').first().json.event_type }}\" }",
+        "options": {}
+      },
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1200, 340]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Resolve Event Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Event Context": {
+      "main": [
+        [
+          {
+            "node": "Skip Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Event?": {
+      "main": [
+        [
+          {
+            "node": "Respond Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Insert Email Activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Email Activity": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "DealerCRM"
+    }
+  ]
+}

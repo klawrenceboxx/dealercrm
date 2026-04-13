@@ -17,8 +17,9 @@ Automatically follow up with car dealership leads via AI-generated SMS. Classify
   Trigger: Webhook (website form / Meta Lead Ads)
   → Normalize fields (E.164 phone, UUID lead_id)
   → Check for duplicate phone in Supabase
-  → INSERT into Supabase leads table
-  → POST to Workflow 02 with {lead_id, trigger_type: "first_contact"}
+  → Round-robin assign only reps who are active and currently inside their punch window
+  → INSERT into Supabase leads table with assigned_at, rep_response_at=null, autopilot_active=false
+  → If no rep is currently on shift: leave unassigned, set autopilot_active=true, POST to Workflow 02 immediately
 
 [02] AI SMS Engine
   Trigger: Webhook (called by 01 and 04)
@@ -52,9 +53,11 @@ Automatically follow up with car dealership leads via AI-generated SMS. Classify
 
 [04] Sequence Scheduler
   Trigger: Schedule — every 15 minutes
-  → Supabase query: next_follow_up <= now AND opted_out=false AND autopilot_active=true AND stage not in [Hot, Closed, Unsubscribed]
-  → For each result: map sequence_step → trigger_type, POST to Workflow 02
-  → If sequence_step > 4: update stage=Closed
+  → Supabase query: open leads with assigned_at / rep_response_at / next_follow_up fields
+  → If assigned rep has not responded within 4 hours: set autopilot_active=true and POST first_contact to Workflow 02
+  → If lead has not replied within 3 days of assignment: reassign to the next on-shift rep, reset assigned_at, and POST first_contact to Workflow 02
+  → For autopilot_active leads with next_follow_up <= now: map sequence_step → trigger_type, POST to Workflow 02
+  → If sequence_step > 4: update stage=Closed and autopilot_active=false
 
 [05] Hot Lead Alert
   Trigger: Webhook (called by 02 and 03)
@@ -98,12 +101,12 @@ Body: { "lead_id": "...", "direction": "outbound", "body": "...", "trigger_type"
 **UPDATE lead after SMS:**
 ```
 PATCH /rest/v1/leads?id=eq.{{lead_id}}
-Body: { "last_sms_at": "now()", "sms_count": {{sms_count + 1}}, "intent_score": "...", "sequence_step": {{step + 1}}, "next_follow_up": "..." }
+Body: { "last_sms_at": "now()", "sms_count": {{sms_count + 1}}, "intent_score": "...", "sequence_step": {{step + 1}}, "next_follow_up": "...", "autopilot_active": true }
 ```
 
 **Scheduler query (Workflow 04):**
 ```
-GET /rest/v1/leads?next_follow_up=lte.{{now}}&opted_out=eq.false&autopilot_active=eq.true&stage=not.in.(hot,closed,unsubscribed)&select=id,lead_id,sequence_step,phone,first_name
+GET /rest/v1/leads?opted_out=eq.false&stage=not.in.(hot,closed,unsubscribed,lost)&select=id,lead_id,sequence_step,phone,first_name,next_follow_up,assigned_to,assigned_at,rep_response_at,last_reply_at,autopilot_active
 ```
 
 **SELECT available inventory (for Claude context):**
