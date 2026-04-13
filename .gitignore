@@ -26,3 +26,8 @@ dist-ssr
 # env files (never commit)
 .env
 .env.local
+
+# temp files and caches
+.tmp/
+tools/__pycache__/
+**/__pycache__/

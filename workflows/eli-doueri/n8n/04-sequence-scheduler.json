@@ -1,0 +1,128 @@
+{
+  "name": "[04] Sequence Scheduler",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "next_follow_up", "value": "=lte.{{ new Date().toISOString() }}" },
+            { "name": "opted_out", "value": "eq.false" },
+            { "name": "stage", "value": "not.in.(hot,closed,unsubscribed,lost)" },
+            { "name": "select", "value": "id,lead_id,sequence_step,phone,first_name" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "query-due-leads",
+      "name": "Query Due Leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = $input.first().json;\nconst leads = Array.isArray(results) ? results : [results];\n\n// Filter out empty results\nconst validLeads = leads.filter(l => l && l.id);\n\nif (validLeads.length === 0) {\n  return []; // Nothing to process\n}\n\nconst STEP_TO_TRIGGER = {\n  0: 'first_contact',\n  1: 'follow_up_day3',\n  2: 'follow_up_day7',\n  3: 'follow_up_day14',\n  4: 'follow_up_day30'\n};\n\nreturn validLeads.map(lead => {\n  const step = lead.sequence_step || 0;\n  \n  // If sequence exhausted, mark for closing\n  if (step > 4) {\n    return { json: { ...lead, _action: 'close', trigger_type: null } };\n  }\n  \n  return { json: {\n    ...lead,\n    _action: 'send',\n    trigger_type: STEP_TO_TRIGGER[step] || 'follow_up_day30'\n  }};\n});"
+      },
+      "id": "map-leads",
+      "name": "Map Leads to Triggers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "action-check",
+              "leftValue": "={{ $json._action }}",
+              "rightValue": "close",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-close",
+      "name": "Sequence Exhausted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"stage\": \"closed\",\n  \"next_follow_up\": null\n}",
+        "options": {}
+      },
+      "id": "close-lead",
+      "name": "Close Exhausted Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_SMS_ENGINE }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ $json.id }}\",\n  \"trigger_type\": \"{{ $json.trigger_type }}\"\n}",
+        "options": {}
+      },
+      "id": "call-sms-engine",
+      "name": "Call WF02 SMS Engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 400]
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": { "main": [[{ "node": "Query Due Leads", "type": "main", "index": 0 }]] },
+    "Query Due Leads": { "main": [[{ "node": "Map Leads to Triggers", "type": "main", "index": 0 }]] },
+    "Map Leads to Triggers": { "main": [[{ "node": "Sequence Exhausted?", "type": "main", "index": 0 }]] },
+    "Sequence Exhausted?": {
+      "main": [
+        [{ "node": "Close Exhausted Lead", "type": "main", "index": 0 }],
+        [{ "node": "Call WF02 SMS Engine", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "DealerCRM" }]
+}

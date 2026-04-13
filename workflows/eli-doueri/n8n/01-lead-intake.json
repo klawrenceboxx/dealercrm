@@ -1,0 +1,176 @@
+{
+  "name": "[01] Lead Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize incoming lead data from website form or Meta Lead Ads\nconst input = $input.first().json;\n\n// Normalize phone to E.164\nlet phone = (input.phone || input.phone_number || '').replace(/[^\\d+]/g, '');\nif (phone && !phone.startsWith('+')) {\n  // Assume North American if 10 digits\n  if (phone.length === 10) phone = '+1' + phone;\n  else if (phone.length === 11 && phone.startsWith('1')) phone = '+' + phone;\n}\n\nconst leadId = crypto.randomUUID();\n\nreturn [{\n  json: {\n    lead_id: leadId,\n    first_name: (input.first_name || input.name || 'Unknown').trim(),\n    last_name: (input.last_name || '').trim(),\n    phone: phone || null,\n    email: (input.email || '').trim() || null,\n    source: input.source === 'meta' ? 'meta' : 'website',\n    vehicle_interest: (input.vehicle_interest || input.vehicle || '').trim() || null,\n    stage: 'new',\n    intent_score: 'cold',\n    sequence_step: 0,\n    demo_mode: true,\n    next_follow_up: null,\n    opted_out: false,\n    salesperson_alerted: false,\n    sms_count: 0,\n    assigned_to: null\n  }\n}];"
+      },
+      "id": "normalize",
+      "name": "Normalize Lead Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "phone", "value": "=eq.{{ $json.phone }}" },
+            { "name": "select", "value": "id,phone" },
+            { "name": "limit", "value": "1" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "check-duplicate",
+      "name": "Check Duplicate Phone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Normalize Lead Data').first().json;\nconst duplicates = $input.first().json;\n\n// If response is an array and has results, it's a duplicate\nconst results = Array.isArray(duplicates) ? duplicates : [duplicates];\nconst isDuplicate = results.length > 0 && results[0]?.id;\n\nif (isDuplicate) {\n  return [{ json: { ...lead, is_duplicate: true, existing_id: results[0].id } }];\n}\n\nreturn [{ json: { ...lead, is_duplicate: false } }];"
+      },
+      "id": "check-dup-result",
+      "name": "Evaluate Duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "dup-check",
+              "leftValue": "={{ $json.is_duplicate }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-duplicate",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Round-robin assignment\n// 1. Get active reps ordered by rr_order\n// 2. Get current rr_index from settings\n// 3. Assign and increment\n\nconst baseUrl = $env.SUPABASE_URL;\nconst key = $env.SUPABASE_SERVICE_ROLE_KEY;\nconst headers = {\n  'apikey': key,\n  'Authorization': `Bearer ${key}`,\n  'Content-Type': 'application/json',\n  'Prefer': 'return=representation'\n};\n\n// Get active reps\nconst repsRes = await fetch(`${baseUrl}/rest/v1/profiles?active=eq.true&order=rr_order.asc&select=id,name,rr_order`, { headers });\nconst reps = await repsRes.json();\n\nif (!reps || reps.length === 0) {\n  // No active reps, leave unassigned\n  return [{ json: { ...$input.first().json, assigned_to: null } }];\n}\n\n// Get rr_index\nconst settingsRes = await fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index&select=value`, { headers });\nconst settings = await settingsRes.json();\nconst currentIndex = settings[0]?.value ?? 0;\nconst idx = (typeof currentIndex === 'number' ? currentIndex : parseInt(currentIndex)) % reps.length;\n\nconst assignedRep = reps[idx];\nconst nextIndex = (idx + 1) % reps.length;\n\n// Update rr_index\nawait fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index`, {\n  method: 'PATCH',\n  headers: { ...headers, 'Prefer': 'return=minimal' },\n  body: JSON.stringify({ value: nextIndex })\n});\n\nreturn [{ json: { ...$input.first().json, assigned_to: assignedRep.id } }];"
+      },
+      "id": "round-robin",
+      "name": "Round Robin Assign",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ lead_id: $json.lead_id, first_name: $json.first_name, last_name: $json.last_name, phone: $json.phone || null, email: $json.email || null, source: $json.source, vehicle_interest: $json.vehicle_interest || null, stage: 'new', intent_score: 'cold', sequence_step: 0, demo_mode: $json.demo_mode, opted_out: false, salesperson_alerted: false, sms_count: 0, assigned_to: $json.assigned_to || null }) }}",
+        "options": {}
+      },
+      "id": "insert-lead",
+      "name": "Insert Lead to Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_SMS_ENGINE }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ Array.isArray($json) ? $json[0].id : $json.id }}\",\n  \"trigger_type\": \"first_contact\"\n}",
+        "options": {}
+      },
+      "id": "trigger-sms-engine",
+      "name": "Trigger WF02 SMS Engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'ok', lead_id: Array.isArray($('Insert Lead to Supabase').first().json) ? $('Insert Lead to Supabase').first().json[0].id : $('Insert Lead to Supabase').first().json.id }) }}",
+        "options": {}
+      },
+      "id": "respond-new",
+      "name": "Respond OK (New)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1980, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"duplicate\", \"existing_id\": \"{{ $json.existing_id }}\" }",
+        "options": {}
+      },
+      "id": "respond-dup",
+      "name": "Respond Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1320, 420]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": { "main": [[{ "node": "Normalize Lead Data", "type": "main", "index": 0 }]] },
+    "Normalize Lead Data": { "main": [[{ "node": "Check Duplicate Phone", "type": "main", "index": 0 }]] },
+    "Check Duplicate Phone": { "main": [[{ "node": "Evaluate Duplicate", "type": "main", "index": 0 }]] },
+    "Evaluate Duplicate": { "main": [[{ "node": "Is Duplicate?", "type": "main", "index": 0 }]] },
+    "Is Duplicate?": {
+      "main": [
+        [{ "node": "Respond Duplicate", "type": "main", "index": 0 }],
+        [{ "node": "Round Robin Assign", "type": "main", "index": 0 }]
+      ]
+    },
+    "Round Robin Assign": { "main": [[{ "node": "Insert Lead to Supabase", "type": "main", "index": 0 }]] },
+    "Insert Lead to Supabase": { "main": [[{ "node": "Trigger WF02 SMS Engine", "type": "main", "index": 0 }]] },
+    "Trigger WF02 SMS Engine": { "main": [[{ "node": "Respond OK (New)", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "DealerCRM" }]
+}

@@ -1,0 +1,216 @@
+{
+  "name": "[05] Hot Lead Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hot-lead-alert",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "id", "value": "=eq.{{ $json.lead_id }}" },
+            { "name": "select", "value": "*" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-lead",
+      "name": "Fetch Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const leadResult = $input.first().json;\nconst leads = Array.isArray(leadResult) ? leadResult : [leadResult];\nconst lead = leads[0];\n\nif (!lead || !lead.id) {\n  throw new Error('Lead not found');\n}\n\n// Dedup check\nif (lead.salesperson_alerted === true) {\n  return [{ json: { ...lead, _skip: true } }];\n}\n\nreturn [{ json: { ...lead, _skip: false } }];"
+      },
+      "id": "parse-lead",
+      "name": "Parse Lead + Dedup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "skip-check",
+              "leftValue": "={{ $json._skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-already-alerted",
+      "name": "Already Alerted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "lead_id", "value": "=eq.{{ $json.id }}" },
+            { "name": "select", "value": "direction,body,sent_at" },
+            { "name": "order", "value": "sent_at.desc" },
+            { "name": "limit", "value": "5" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-sms-history",
+      "name": "Fetch Last 5 Messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Parse Lead + Dedup').first().json;\nconst messagesRaw = $input.first().json;\nconst messages = Array.isArray(messagesRaw) ? messagesRaw : [messagesRaw];\n\n// Build formatted conversation log (oldest first)\nconst conversation = messages\n  .filter(m => m && m.body)\n  .reverse()\n  .map(m => {\n    const dir = m.direction === 'inbound' ? 'CUSTOMER' : 'AI';\n    const time = m.sent_at ? new Date(m.sent_at).toLocaleString('en-CA', { timeZone: 'America/Toronto' }) : '';\n    return `[${dir}] ${time}\\n${m.body}`;\n  })\n  .join('\\n\\n');\n\nconst smsBody = `HOT LEAD: ${lead.first_name} ${lead.last_name || ''}\\nPhone: ${lead.phone}\\nVehicle: ${lead.vehicle_interest || 'Not specified'}\\nIntent: ${lead.intent_score}\\nCall them ASAP!`;\n\nconst emailSubject = `Hot Lead: ${lead.first_name} ${lead.last_name || ''} - ${lead.vehicle_interest || 'Vehicle Inquiry'}`;\n\nconst emailBody = `<div style=\"font-family: Arial, sans-serif; max-width: 600px;\">\n<h2 style=\"color: #dc2626;\">Hot Lead Alert</h2>\n<table style=\"border-collapse: collapse; width: 100%; margin-bottom: 20px;\">\n  <tr><td style=\"padding: 8px; border: 1px solid #e2e8f0; font-weight: bold;\">Name</td><td style=\"padding: 8px; border: 1px solid #e2e8f0;\">${lead.first_name} ${lead.last_name || ''}</td></tr>\n  <tr><td style=\"padding: 8px; border: 1px solid #e2e8f0; font-weight: bold;\">Phone</td><td style=\"padding: 8px; border: 1px solid #e2e8f0;\"><a href=\"tel:${lead.phone}\">${lead.phone}</a></td></tr>\n  <tr><td style=\"padding: 8px; border: 1px solid #e2e8f0; font-weight: bold;\">Email</td><td style=\"padding: 8px; border: 1px solid #e2e8f0;\">${lead.email || 'N/A'}</td></tr>\n  <tr><td style=\"padding: 8px; border: 1px solid #e2e8f0; font-weight: bold;\">Source</td><td style=\"padding: 8px; border: 1px solid #e2e8f0;\">${lead.source}</td></tr>\n  <tr><td style=\"padding: 8px; border: 1px solid #e2e8f0; font-weight: bold;\">Vehicle Interest</td><td style=\"padding: 8px; border: 1px solid #e2e8f0;\">${lead.vehicle_interest || 'Not specified'}</td></tr>\n  <tr><td style=\"padding: 8px; border: 1px solid #e2e8f0; font-weight: bold;\">Intent Score</td><td style=\"padding: 8px; border: 1px solid #e2e8f0; color: #dc2626; font-weight: bold;\">${(lead.intent_score || '').toUpperCase()}</td></tr>\n</table>\n\n<h3>Last 5 Messages</h3>\n<div style=\"background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; font-size: 14px; white-space: pre-wrap;\">${conversation || '(No messages yet)'}</div>\n\n<p style=\"margin-top: 20px; color: #64748b; font-size: 12px;\">This alert was sent by the DealerCRM automation system.</p>\n</div>`;\n\nreturn [{ json: {\n  lead_id: lead.id,\n  smsBody,\n  emailSubject,\n  emailBody\n}}];"
+      },
+      "id": "build-alerts",
+      "name": "Build Alert Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "from": "={{ $env.TWILIO_FROM_NUMBER }}",
+        "to": "={{ $env.SALESPERSON_PHONE }}",
+        "body": "={{ $json.smsBody }}"
+      },
+      "id": "twilio-alert",
+      "name": "SMS Alert to Salesperson",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [1540, 120],
+      "credentials": {
+        "twilioApi": { "id": "TWILIO_CREDENTIAL_ID", "name": "Twilio" }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $env.SALESPERSON_EMAIL }}",
+        "subject": "={{ $('Build Alert Content').first().json.emailSubject }}",
+        "emailType": "html",
+        "message": "={{ $('Build Alert Content').first().json.emailBody }}",
+        "options": {}
+      },
+      "id": "gmail-alert",
+      "name": "Email Alert to Salesperson",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1540, 280],
+      "credentials": {
+        "gmailOAuth2": { "id": "GMAIL_CREDENTIAL_ID", "name": "Gmail" }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "numberInputs": 2,
+        "options": {}
+      },
+      "id": "merge-alerts",
+      "name": "Wait for Both Alerts",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1760, 200]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $('Build Alert Content').first().json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"salesperson_alerted\": true,\n  \"stage\": \"hot\"\n}",
+        "options": {}
+      },
+      "id": "mark-alerted",
+      "name": "Mark Salesperson Alerted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 200]
+    },
+    {
+      "parameters": {},
+      "id": "noop-skip",
+      "name": "Already Alerted (Skip)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1100, 400]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": { "main": [[{ "node": "Fetch Lead", "type": "main", "index": 0 }]] },
+    "Fetch Lead": { "main": [[{ "node": "Parse Lead + Dedup", "type": "main", "index": 0 }]] },
+    "Parse Lead + Dedup": { "main": [[{ "node": "Already Alerted?", "type": "main", "index": 0 }]] },
+    "Already Alerted?": {
+      "main": [
+        [{ "node": "Already Alerted (Skip)", "type": "main", "index": 0 }],
+        [{ "node": "Fetch Last 5 Messages", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch Last 5 Messages": { "main": [[{ "node": "Build Alert Content", "type": "main", "index": 0 }]] },
+    "Build Alert Content": {
+      "main": [
+        [
+          { "node": "SMS Alert to Salesperson", "type": "main", "index": 0 },
+          { "node": "Email Alert to Salesperson", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "SMS Alert to Salesperson": { "main": [[{ "node": "Wait for Both Alerts", "type": "main", "index": 0 }]] },
+    "Email Alert to Salesperson": { "main": [[{ "node": "Wait for Both Alerts", "type": "main", "index": 1 }]] },
+    "Wait for Both Alerts": { "main": [[{ "node": "Mark Salesperson Alerted", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "DealerCRM" }]
+}

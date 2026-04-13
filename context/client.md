@@ -7,7 +7,7 @@
 | Eli Doueri | Owner — car dealership + Cam Auto Pro | mr.doueri@gmail.com |
 | Sleiman Moujaes | Eli's nephew — day-to-day contact for this project | TBD |
 
-**Decision chain:** Sleiman is the technical point of contact. Eli owns the business and gives final approval.
+**Decision chain:** Eli is the decision-maker and final authority. Sleiman is the day-to-day user and technical point of contact, but does not hold approval power.
 
 **Relationship history:** Kaleel previously built Eli's Shopify store (Cam Auto Pro — PDR tools). This is the second project together. Eli reached out on Upwork specifically to Kaleel — messaged him out of ~20 applicants.
 
@@ -64,7 +64,7 @@ Call with Sleiman (Eli's nephew). Key things confirmed:
 
 ## Strategy
 
-**Demo-first.** Build the full system with simulated leads (demo mode — no real SMS). Record a Loom walkthrough. Show Sleiman it works. Get approval. Swap in real credentials (8 config changes). Invoice after demo is approved.
+**Demo-first.** Build the full system with simulated leads (demo mode — no real SMS). Record a Loom walkthrough. Show Eli (decision-maker) it works — Sleiman may be looped in too. Get Eli's approval. Swap in real credentials (8 config changes). Invoice after demo is approved.
 
 **No upfront invoice.** This is spec work to close the deal.
 
