@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from "react-router-dom";
 import { supabase } from "./lib/supabase";
+import { ProfileProvider, useProfile } from "./lib/ProfileContext";
+import { isManagerRole } from "./lib/roles";
 import Leads from "./pages/Leads";
-import LeadDetail from "./pages/LeadDetail";
+import LeadDetail from "./pages/LeadDetailPage";
 import Pipeline from "./pages/Pipeline";
 import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
+import Admin from "./pages/Admin";
 import Login from "./pages/Login";
 
 const NAV_ITEMS = [
@@ -47,6 +50,7 @@ const NAV_ITEMS = [
   {
     to: "/dashboard",
     label: "Dashboard",
+    managerOnly: true,
     icon: (
       <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
         <rect x="3" y="3" width="7" height="7" rx="1" />
@@ -56,11 +60,22 @@ const NAV_ITEMS = [
       </svg>
     ),
   },
+  {
+    to: "/admin",
+    label: "Admin",
+    managerOnly: true,
+    icon: (
+      <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+        <path d="M12 2l2.4 4.86 5.36.78-3.88 3.78.92 5.34L12 14.27 7.2 16.76l.92-5.34L4.24 7.64l5.36-.78L12 2z" />
+      </svg>
+    ),
+  },
 ];
 
 function Sidebar({ profile, userEmail }) {
-  const displayName = profile?.full_name || userEmail?.split("@")[0] || "User";
+  const displayName = profile?.full_name || profile?.name || userEmail?.split("@")[0] || "User";
   const initial = displayName[0].toUpperCase();
+  const visibleNavItems = NAV_ITEMS.filter((item) => !item.managerOnly || isManagerRole(profile?.role));
 
   async function handleLogout() {
     localStorage.removeItem("demo_session");
@@ -88,7 +103,7 @@ function Sidebar({ profile, userEmail }) {
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-0.5">
         <p className="text-xs font-semibold tracking-wider px-2 mb-3" style={{ color: "#334155" }}>MENU</p>
-        {NAV_ITEMS.map(({ to, label, icon }) => (
+        {visibleNavItems.map(({ to, label, icon }) => (
           <NavLink
             key={to}
             to={to}
@@ -147,8 +162,64 @@ function Sidebar({ profile, userEmail }) {
   );
 }
 
-// TODO: remove DEMO_MODE once Supabase project is restored
-const DEMO_SESSION = { user: { email: "kaleellawarence-boxx@hotmail.ca" } };
+function ManagerRoute({ children }) {
+  const { profile } = useProfile();
+
+  if (!isManagerRole(profile?.role)) {
+    return <Navigate to="/leads" replace />;
+  }
+
+  return children;
+}
+
+function AuthenticatedApp({ session }) {
+  const { profile, profileLoading } = useProfile();
+
+  useEffect(() => {
+    if (!profile?.suspended_at) return;
+    supabase.auth.signOut();
+  }, [profile?.suspended_at]);
+
+  if (profileLoading) {
+    return (
+      <div style={{ minHeight: "100vh", backgroundColor: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: "24px", height: "24px", border: "2px solid #1e3a5f", borderTopColor: "#2563eb", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-screen" style={{ backgroundColor: "#f1f5f9" }}>
+      <Sidebar profile={profile} userEmail={session.user?.email} />
+      <main className="flex-1 overflow-auto">
+        <Routes>
+          <Route path="/" element={<Navigate to="/leads" replace />} />
+          <Route path="/leads" element={<Leads />} />
+          <Route path="/leads/:id" element={<LeadDetail />} />
+          <Route path="/pipeline" element={<Pipeline />} />
+          <Route path="/inventory" element={<Inventory />} />
+          <Route
+            path="/dashboard"
+            element={(
+              <ManagerRoute>
+                <Dashboard />
+              </ManagerRoute>
+            )}
+          />
+          <Route
+            path="/admin"
+            element={(
+              <ManagerRoute>
+                <Admin currentProfile={profile} />
+              </ManagerRoute>
+            )}
+          />
+          <Route path="*" element={<Navigate to="/leads" replace />} />
+        </Routes>
+      </main>
+    </div>
+  );
+}
 
 export default function App() {
   const [session, setSession] = useState(DEMO_SESSION); // TODO: restore auth
@@ -164,28 +235,16 @@ export default function App() {
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
-      if (session) fetchProfile(session.user.id);
-      else setLoading(false);
+      setLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      if (session) fetchProfile(session.user.id);
-      else setProfile(null);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setLoading(false);
     });
 
     return () => subscription.unsubscribe();
   }, []);
-
-  async function fetchProfile(userId) {
-    const { data } = await supabase
-      .from("profiles")
-      .select("full_name, role")
-      .eq("id", userId)
-      .single();
-    setProfile(data || null);
-    setLoading(false);
-  }
 
   if (loading) {
     return (
@@ -199,19 +258,9 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <div className="flex min-h-screen" style={{ backgroundColor: "#f1f5f9" }}>
-        <Sidebar profile={profile} userEmail={session.user?.email} />
-        <main className="flex-1 overflow-auto">
-          <Routes>
-            <Route path="/" element={<Navigate to="/leads" replace />} />
-            <Route path="/leads" element={<Leads />} />
-            <Route path="/leads/:id" element={<LeadDetail />} />
-            <Route path="/pipeline" element={<Pipeline />} />
-            <Route path="/inventory" element={<Inventory />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-          </Routes>
-        </main>
-      </div>
+      <ProfileProvider user={session.user}>
+        <AuthenticatedApp session={session} />
+      </ProfileProvider>
     </BrowserRouter>
   );
 }

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Style Auto — Your Next Ride Starts Here</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        font-family: "Outfit", sans-serif;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <!-- Hero -->
+    <header class="relative bg-slate-900 text-white overflow-hidden">
+      <img
+        src="https://images.unsplash.com/photo-1568605117036-5fe5e7bab0b7?w=1400&h=500&fit=crop&q=80"
+        alt="Car lot"
+        class="absolute inset-0 w-full h-full object-cover opacity-40"
+      />
+      <div class="relative z-10 max-w-4xl mx-auto px-6 py-24 text-center">
+        <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight mb-4">
+          Style Auto
+        </h1>
+        <p class="text-lg md:text-xl text-slate-300 max-w-xl mx-auto">
+          Quality pre-owned vehicles in Quebec. Find your next ride — fill out
+          the form below and we'll match you with the perfect car.
+        </p>
+      </div>
+    </header>
+
+    <!-- Form Section -->
+    <main class="max-w-lg mx-auto px-4 -mt-12 relative z-20 pb-20">
+      <!--
+      DealerCRM Embeddable Form
+      Replace data-company-id with your actual company UUID from Supabase.
+      Replace data-webhook-url with your n8n webhook URL.
+    -->
+      <script
+        src="./dealercrm-form.js"
+        data-company-id="9744fadb-a620-4815-8367-640ad1c3307c"
+        data-webhook-url="http://localhost:5678/webhook-test/form-intake"
+      ></script>
+    </main>
+
+    <!-- Footer -->
+    <footer class="text-center text-sm text-slate-400 py-8">
+      &copy; 2026 Style Auto. For testing purposes only.
+    </footer>
+  </body>
+</html>

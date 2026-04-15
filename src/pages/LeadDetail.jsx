@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 
@@ -19,19 +19,23 @@ export default function LeadDetail() {
   const [lead, setLead] = useState(null);
   const [messages, setMessages] = useState([]);
   const [notes, setNotes] = useState([]);
+  const [activity, setActivity] = useState([]);
   const [newNote, setNewNote] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const currentUserRef = useRef(null);
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      currentUserRef.current = session?.user?.id || null;
-    });
-    fetchAll();
+  const fetchActivity = useCallback(async () => {
+    const { data } = await supabase
+      .from("activity_log")
+      .select("id, event_type, metadata, created_at, actor_id, actor:profiles!activity_log_actor_id_fkey(full_name)")
+      .eq("lead_id", id)
+      .order("created_at", { ascending: false });
+
+    setActivity(data || []);
   }, [id]);
 
-  async function fetchAll() {
+  const fetchAll = useCallback(async () => {
     setLoading(true);
     const [leadRes, msgRes, noteRes] = await Promise.all([
       supabase.from("leads").select("*").eq("id", id).single(),
@@ -41,23 +45,77 @@ export default function LeadDetail() {
     if (leadRes.data) setLead(leadRes.data);
     if (msgRes.data) setMessages(msgRes.data);
     if (noteRes.data) setNotes(noteRes.data);
+    await fetchActivity();
     setLoading(false);
+  }, [fetchActivity, id]);
+
+  async function logRepResponse(noteExcerpt = null) {
+    const repResponseAt = new Date().toISOString();
+    const { data } = await supabase
+      .from("leads")
+      .update({ rep_response_at: repResponseAt, autopilot_active: false })
+      .eq("id", id)
+      .select()
+      .single();
+
+    await supabase.from("activity_log").insert({
+      lead_id: id,
+      event_type: "rep_response",
+      actor_id: currentUserRef.current,
+      metadata: noteExcerpt ? { note_excerpt: noteExcerpt } : {},
+    });
+
+    if (data) {
+      setLead(data);
+    }
   }
 
   async function updateStage(stage) {
-    const { data } = await supabase.from("leads").update({ stage }).eq("id", id).select().single();
-    if (data) setLead(data);
+    const payload = { stage };
+    if (stage !== "new") {
+      payload.autopilot_active = false;
+      payload.rep_response_at = lead?.rep_response_at || new Date().toISOString();
+    }
+
+    const { data } = await supabase.from("leads").update(payload).eq("id", id).select().single();
+    if (data) {
+      setLead(data);
+      await fetchActivity();
+    }
   }
 
   async function addNote(e) {
     e.preventDefault();
     if (!newNote.trim()) return;
     setSaving(true);
-    const { data } = await supabase.from("notes").insert({ lead_id: id, content: newNote.trim(), created_by: currentUserRef.current }).select("*, profiles(full_name)").single();
-    if (data) setNotes([data, ...notes]);
+    const noteContent = newNote.trim();
+    const { data } = await supabase.from("notes").insert({ lead_id: id, content: noteContent, created_by: currentUserRef.current }).select("*, profiles(full_name)").single();
+    if (data) {
+      setNotes([data, ...notes]);
+      await logRepResponse(noteContent.slice(0, 120));
+      await fetchActivity();
+    }
     setNewNote("");
     setSaving(false);
   }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      currentUserRef.current = session?.user?.id || null;
+    });
+
+    Promise.resolve().then(() => {
+      if (!cancelled) {
+        fetchAll();
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchAll, id]);
 
   if (loading) return <div className="p-6 text-sm" style={{ color: "#94a3b8" }}>Loading...</div>;
   if (!lead) return <div className="p-6 text-sm" style={{ color: "#dc2626" }}>Lead not found.</div>;
@@ -98,14 +156,22 @@ export default function LeadDetail() {
               </p>
             </div>
           </div>
-          <select
-            value={lead.stage}
-            onChange={(e) => updateStage(e.target.value)}
-            className="text-xs font-semibold px-3 py-1.5 rounded-full border-0 cursor-pointer capitalize focus:outline-none"
-            style={{ backgroundColor: stageStyle.bg, color: stageStyle.color }}
-          >
-            {STAGES.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => logRepResponse()}
+              className="px-3 py-1.5 rounded-full text-xs font-semibold border border-slate-200 text-slate-600 hover:bg-slate-50"
+            >
+              Mark rep responded
+            </button>
+            <select
+              value={lead.stage}
+              onChange={(e) => updateStage(e.target.value)}
+              className="text-xs font-semibold px-3 py-1.5 rounded-full border-0 cursor-pointer capitalize focus:outline-none"
+              style={{ backgroundColor: stageStyle.bg, color: stageStyle.color }}
+            >
+              {STAGES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -187,6 +253,19 @@ export default function LeadDetail() {
           </div>
         </div>
       </div>
+
+      <div className="bg-white rounded-xl p-5 mt-4" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+        <h2 className="text-xs font-semibold tracking-wider mb-4" style={{ color: "#64748b" }}>ACTIVITY</h2>
+        {activity.length === 0 ? (
+          <p className="text-xs" style={{ color: "#94a3b8" }}>No activity logged yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {activity.map((entry) => (
+              <ActivityItem key={entry.id} entry={entry} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -198,4 +277,77 @@ function InfoItem({ label, value }) {
       <dd className="text-sm font-medium capitalize" style={{ color: "#0f172a" }}>{value}</dd>
     </div>
   );
+}
+
+function ActivityItem({ entry }) {
+  const actorName = entry.actor?.full_name || null;
+  const details = describeActivity(entry, actorName);
+
+  return (
+    <div className="rounded-lg px-4 py-3" style={{ backgroundColor: "#f8fafc", border: "1px solid #e2e8f0" }}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-semibold" style={{ color: "#0f172a" }}>{details.title}</p>
+          {details.description && (
+            <p className="text-sm mt-1" style={{ color: "#475569" }}>{details.description}</p>
+          )}
+        </div>
+        <span className="text-xs shrink-0" style={{ color: "#94a3b8" }}>
+          {new Date(entry.created_at).toLocaleString()}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function describeActivity(entry, actorName) {
+  const metadata = entry.metadata || {};
+
+  switch (entry.event_type) {
+    case "form_submitted":
+      return {
+        title: "Website form submitted",
+        description: metadata.vehicle_interest ? `Vehicle interest: ${metadata.vehicle_interest}` : null,
+      };
+    case "lead_assigned":
+      return {
+        title: actorName ? `Lead assigned to ${actorName}` : "Lead assigned",
+        description: metadata.previous_assigned_to ? "Round-robin or manual reassignment logged." : "Initial ownership captured.",
+      };
+    case "rep_response":
+      return {
+        title: actorName ? `${actorName} logged a response` : "Rep response logged",
+        description: metadata.note_excerpt || "A rep interaction was captured from a note.",
+      };
+    case "sms_sent":
+      return {
+        title: "SMS sent",
+        description: metadata.body_excerpt || metadata.trigger_type || "Outbound SMS logged.",
+      };
+    case "ai_auto_reply_sent":
+      return {
+        title: "AI email auto-reply sent",
+        description: metadata.subject || null,
+      };
+    case "email_opened":
+      return {
+        title: "Email opened",
+        description: metadata.recipient || "Resend open webhook received.",
+      };
+    case "email_clicked":
+      return {
+        title: "Email link clicked",
+        description: metadata.link || metadata.recipient || "Resend click webhook received.",
+      };
+    case "deal_closed":
+      return {
+        title: "Deal closed",
+        description: actorName ? `Attributed to ${actorName}.` : "Lead stage moved to closed.",
+      };
+    default:
+      return {
+        title: entry.event_type.replace(/_/g, " "),
+        description: null,
+      };
+  }
 }

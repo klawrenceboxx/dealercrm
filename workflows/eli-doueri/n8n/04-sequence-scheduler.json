@@ -1,0 +1,127 @@
+{
+  "name": "[04] Sequence Scheduler",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "opted_out", "value": "eq.false" },
+            { "name": "stage", "value": "not.in.(hot,closed,unsubscribed,lost)" },
+            { "name": "select", "value": "id,lead_id,sequence_step,phone,first_name,next_follow_up,assigned_to,assigned_at,rep_response_at,last_reply_at,autopilot_active" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "query-due-leads",
+      "name": "Query Due Leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = $input.first().json;\nconst leads = Array.isArray(results) ? results : [results];\nconst validLeads = leads.filter(lead => lead && lead.id);\n\nif (validLeads.length === 0) {\n  return [];\n}\n\nconst baseUrl = $env.SUPABASE_URL;\nconst key = $env.SUPABASE_SERVICE_ROLE_KEY;\nconst headers = {\n  apikey: key,\n  Authorization: `Bearer ${key}`,\n  'Content-Type': 'application/json',\n  Prefer: 'return=minimal'\n};\n\nconst STEP_TO_TRIGGER = {\n  0: 'first_contact',\n  1: 'follow_up_day3',\n  2: 'follow_up_day7',\n  3: 'follow_up_day14',\n  4: 'follow_up_day30'\n};\n\nfunction toDate(value) {\n  if (!value) return null;\n  const parsed = new Date(value);\n  return Number.isNaN(parsed.getTime()) ? null : parsed;\n}\n\nfunction getMinutesInTimeZone(date, timeZone) {\n  const parts = new Intl.DateTimeFormat('en-CA', {\n    hour: '2-digit',\n    minute: '2-digit',\n    hour12: false,\n    timeZone: timeZone || 'America/Toronto'\n  }).formatToParts(date);\n\n  const hours = parseInt(parts.find(part => part.type === 'hour')?.value || '0', 10);\n  const minutes = parseInt(parts.find(part => part.type === 'minute')?.value || '0', 10);\n  return hours * 60 + minutes;\n}\n\nfunction isWorking(rep, date) {\n  if (!rep?.active) return false;\n  const start = Number(rep.shift_start_minutes);\n  const end = Number(rep.shift_end_minutes);\n  if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) return true;\n\n  const nowMinutes = getMinutesInTimeZone(date, rep.shift_timezone || 'America/Toronto');\n  if (start < end) {\n    return nowMinutes >= start && nowMinutes < end;\n  }\n\n  return nowMinutes >= start || nowMinutes < end;\n}\n\nfunction leadRepliedSinceAssignment(lead) {\n  const assignedAt = toDate(lead.assigned_at);\n  const lastReplyAt = toDate(lead.last_reply_at);\n  if (!assignedAt || !lastReplyAt) return false;\n  return lastReplyAt.getTime() >= assignedAt.getTime();\n}\n\nasync function patchLead(leadId, payload) {\n  await fetch(`${baseUrl}/rest/v1/leads?id=eq.${leadId}`, {\n    method: 'PATCH',\n    headers,\n    body: JSON.stringify(payload)\n  });\n}\n\nasync function fetchWorkingReps(excludeId, now) {\n  const response = await fetch(`${baseUrl}/rest/v1/profiles?active=eq.true&select=id,name,rr_order,active,shift_start_minutes,shift_end_minutes,shift_timezone`, { headers: { apikey: key, Authorization: `Bearer ${key}` } });\n  const raw = await response.json();\n  const reps = (Array.isArray(raw) ? raw : [])\n    .filter(rep => isWorking(rep, now))\n    .sort((a, b) => {\n      const orderDiff = (a.rr_order ?? 0) - (b.rr_order ?? 0);\n      if (orderDiff !== 0) return orderDiff;\n      return (a.name || '').localeCompare(b.name || '');\n    });\n\n  if (reps.length <= 1) return reps;\n  return reps.filter(rep => rep.id !== excludeId);\n}\n\nasync function nextRep(excludeId, now) {\n  const reps = await fetchWorkingReps(excludeId, now);\n  if (reps.length === 0) return null;\n\n  const settingsResponse = await fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index&select=value`, { headers: { apikey: key, Authorization: `Bearer ${key}` } });\n  const settings = await settingsResponse.json();\n  const rawIndex = settings[0]?.value ?? 0;\n  const currentIndex = typeof rawIndex === 'number' ? rawIndex : parseInt(String(rawIndex).replace(/[^\\d-]/g, ''), 10) || 0;\n  const idx = ((currentIndex % reps.length) + reps.length) % reps.length;\n  const rep = reps[idx];\n  const nextIndex = (idx + 1) % reps.length;\n\n  await fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index`, {\n    method: 'PATCH',\n    headers,\n    body: JSON.stringify({ value: nextIndex })\n  });\n\n  return rep;\n}\n\nconst now = new Date();\nconst fourHoursMs = 4 * 60 * 60 * 1000;\nconst threeDaysMs = 3 * 24 * 60 * 60 * 1000;\nconst actions = [];\n\nfor (const lead of validLeads) {\n  const assignedAt = toDate(lead.assigned_at);\n  const nextFollowUp = toDate(lead.next_follow_up);\n  const repResponded = Boolean(lead.rep_response_at);\n\n  if (assignedAt && !repResponded) {\n    const ageMs = now.getTime() - assignedAt.getTime();\n\n    if (ageMs >= threeDaysMs && !leadRepliedSinceAssignment(lead)) {\n      const reassignedRep = await nextRep(lead.assigned_to, now);\n      await patchLead(lead.id, {\n        assigned_to: reassignedRep?.id ?? null,\n        assigned_at: now.toISOString(),\n        rep_response_at: null,\n        autopilot_active: true,\n        sequence_step: 0,\n        stage: 'new',\n        next_follow_up: null\n      });\n\n      actions.push({ json: { id: lead.id, trigger_type: 'first_contact', _action: 'send' } });\n      continue;\n    }\n\n    if (ageMs >= fourHoursMs && !lead.autopilot_active) {\n      await patchLead(lead.id, { autopilot_active: true });\n      actions.push({ json: { id: lead.id, trigger_type: 'first_contact', _action: 'send' } });\n      continue;\n    }\n  }\n\n  if (!lead.autopilot_active || !nextFollowUp || nextFollowUp.getTime() > now.getTime()) {\n    continue;\n  }\n\n  const step = lead.sequence_step || 0;\n  if (step > 4) {\n    await patchLead(lead.id, { stage: 'closed', next_follow_up: null, autopilot_active: false });\n    continue;\n  }\n\n  actions.push({ json: { id: lead.id, trigger_type: STEP_TO_TRIGGER[step] || 'follow_up_day30', _action: 'send' } });\n}\n\nreturn actions;"
+      },
+      "id": "map-leads",
+      "name": "Map Leads to Triggers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "action-check",
+              "leftValue": "={{ $json._action }}",
+              "rightValue": "close",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-close",
+      "name": "Sequence Exhausted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"stage\": \"closed\",\n  \"next_follow_up\": null\n}",
+        "options": {}
+      },
+      "id": "close-lead",
+      "name": "Close Exhausted Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_SMS_ENGINE }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ $json.id }}\",\n  \"trigger_type\": \"{{ $json.trigger_type }}\"\n}",
+        "options": {}
+      },
+      "id": "call-sms-engine",
+      "name": "Call WF02 SMS Engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 400]
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": { "main": [[{ "node": "Query Due Leads", "type": "main", "index": 0 }]] },
+    "Query Due Leads": { "main": [[{ "node": "Map Leads to Triggers", "type": "main", "index": 0 }]] },
+    "Map Leads to Triggers": { "main": [[{ "node": "Sequence Exhausted?", "type": "main", "index": 0 }]] },
+    "Sequence Exhausted?": {
+      "main": [
+        [{ "node": "Close Exhausted Lead", "type": "main", "index": 0 }],
+        [{ "node": "Call WF02 SMS Engine", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "DealerCRM" }]
+}

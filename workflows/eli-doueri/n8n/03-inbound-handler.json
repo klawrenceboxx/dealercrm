@@ -1,0 +1,577 @@
+{
+  "name": "[03] Inbound SMS Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inbound-sms",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Twilio Inbound Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Twilio sends form-encoded data. Extract From (phone) and Body (message).\nconst input = $input.first().json;\nconst phone = input.From || input.from || '';\nconst body = (input.Body || input.body || '').trim();\n\nreturn [{ json: { phone, body } }];"
+      },
+      "id": "parse-twilio",
+      "name": "Parse Twilio Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "phone", "value": "=eq.{{ $json.phone }}" },
+            { "name": "select", "value": "*" },
+            { "name": "limit", "value": "1" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "find-lead",
+      "name": "Find Lead by Phone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const leadResult = $input.first().json;\nconst leads = Array.isArray(leadResult) ? leadResult : [leadResult];\nconst lead = leads[0];\nconst inboundBody = $('Parse Twilio Payload').first().json.body;\nconst phone = $('Parse Twilio Payload').first().json.phone;\n\nif (!lead || !lead.id) {\n  return [{ json: { _action: 'unknown_phone', phone, body: inboundBody } }];\n}\n\n// OPT-OUT CHECK (TCPA) -- must happen FIRST\nconst OPT_OUT_KEYWORDS = ['stop', 'unsubscribe', 'quit', 'cancel'];\nconst isOptOut = OPT_OUT_KEYWORDS.includes(inboundBody.toLowerCase().trim());\n\nif (isOptOut) {\n  return [{ json: { ...lead, _action: 'opt_out', inbound_body: inboundBody } }];\n}\n\n// If lead is already hot, log inbound but don't auto-reply (salesperson owns it)\nif (lead.stage === 'hot' && lead.salesperson_alerted === true) {\n  return [{ json: { ...lead, _action: 'autopilot_off', inbound_body: inboundBody } }];\n}\n\n// Normal processing -- AI auto-replies\nreturn [{ json: { ...lead, _action: 'process', inbound_body: inboundBody } }];"
+      },
+      "id": "evaluate-lead",
+      "name": "Evaluate Lead State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "outputIndex": 0, "conditions": { "conditions": [{ "leftValue": "={{ $json._action }}", "rightValue": "opt_out", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "outputIndex": 1, "conditions": { "conditions": [{ "leftValue": "={{ $json._action }}", "rightValue": "autopilot_off", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "outputIndex": 2, "conditions": { "conditions": [{ "leftValue": "={{ $json._action }}", "rightValue": "process", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "outputIndex": 3, "conditions": { "conditions": [{ "leftValue": "={{ $json._action }}", "rightValue": "unknown_phone", "operator": { "type": "string", "operation": "equals" } }] } }
+          ]
+        }
+      },
+      "id": "switch-action",
+      "name": "Route by Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"opted_out\": true,\n  \"stage\": \"unsubscribed\",\n  \"next_follow_up\": null\n}",
+        "options": {}
+      },
+      "id": "mark-opted-out",
+      "name": "Mark Opted Out",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 60]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "from": "={{ $env.TWILIO_FROM_NUMBER }}",
+        "to": "={{ $('Evaluate Lead State').first().json.phone }}",
+        "body": "=You've been unsubscribed from {{ $env.DEALERSHIP_NAME }}. Text START to re-subscribe."
+      },
+      "id": "twilio-optout-confirm",
+      "name": "Send Opt-Out Confirmation",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [1560, 60],
+      "credentials": {
+        "twilioApi": { "id": "TWILIO_CREDENTIAL_ID", "name": "Twilio" }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ $('Evaluate Lead State').first().json.id }}\",\n  \"direction\": \"inbound\",\n  \"body\": {{ JSON.stringify($('Evaluate Lead State').first().json.inbound_body) }},\n  \"trigger_type\": \"opt_out\"\n}",
+        "options": {}
+      },
+      "id": "log-optout-inbound",
+      "name": "Log Opt-Out Inbound",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 160]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"opt_out_processed\" }",
+        "options": {}
+      },
+      "id": "respond-optout",
+      "name": "Respond Opt-Out",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1780, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ $('Evaluate Lead State').first().json.id }}\",\n  \"direction\": \"inbound\",\n  \"body\": {{ JSON.stringify($('Evaluate Lead State').first().json.inbound_body) }},\n  \"trigger_type\": \"inbound_reply\"\n}",
+        "options": {}
+      },
+      "id": "log-autopilot-off",
+      "name": "Log Inbound (Autopilot Off)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 280]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $('Evaluate Lead State').first().json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"last_reply_at\": \"{{ new Date().toISOString() }}\"\n}",
+        "options": {}
+      },
+      "id": "update-last-reply-passive",
+      "name": "Update last_reply_at (Passive)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 280]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"logged_only_autopilot_off\" }",
+        "options": {}
+      },
+      "id": "respond-passive",
+      "name": "Respond Passive",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1780, 280]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ $('Evaluate Lead State').first().json.id }}\",\n  \"direction\": \"inbound\",\n  \"body\": {{ JSON.stringify($('Evaluate Lead State').first().json.inbound_body) }},\n  \"trigger_type\": \"inbound_reply\"\n}",
+        "options": {}
+      },
+      "id": "log-inbound-active",
+      "name": "Log Inbound Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 480]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $('Evaluate Lead State').first().json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"last_reply_at\": \"{{ new Date().toISOString() }}\"\n}",
+        "options": {}
+      },
+      "id": "update-last-reply",
+      "name": "Update last_reply_at",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 480]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "lead_id", "value": "=eq.{{ $('Evaluate Lead State').first().json.id }}" },
+            { "name": "select", "value": "direction,body,sent_at" },
+            { "name": "order", "value": "sent_at.desc" },
+            { "name": "limit", "value": "3" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-last-messages",
+      "name": "Fetch Last 3 Messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Evaluate Lead State').first().json;\nconst messagesRaw = $input.first().json;\nconst messages = Array.isArray(messagesRaw) ? messagesRaw : [messagesRaw];\n\nconst lastMessages = messages\n  .reverse()\n  .map(m => `${m.direction === 'inbound' ? 'CUSTOMER' : 'AI'}: ${m.body}`)\n  .join('\\n');\n\nreturn [{ json: {\n  lead_id: lead.id,\n  trigger_type: 'inbound_reply',\n  _last_messages: lastMessages,\n  _last_reply: lead.inbound_body\n}}];"
+      },
+      "id": "prep-sms-engine-call",
+      "name": "Prep SMS Engine Call",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 480]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/inventory",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "status", "value": "eq.available" },
+            { "name": "select", "value": "vehicle,year,make,model,trim,color,mileage,price" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-inventory-inbound",
+      "name": "Fetch Inventory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2220, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Evaluate Lead State').first().json;\nconst prepData = $('Prep SMS Engine Call').first().json;\nconst inventoryRaw = $input.first().json;\nconst inventory = Array.isArray(inventoryRaw) ? inventoryRaw : [inventoryRaw];\n\nconst TRIGGER_INSTRUCTIONS = {\n  inbound_reply: 'The lead just replied. Respond naturally and directly to what they said. Classify intent based on their message.'\n};\n\nconst inventoryList = inventory\n  .filter(v => v.vehicle)\n  .map(v => `${v.vehicle} -- ${v.color || 'N/A'} -- ${v.mileage ? v.mileage.toLocaleString() + ' km' : 'New'} -- $${v.price ? v.price.toLocaleString() : 'Call'}`)\n  .join('\\n');\n\nconst systemPrompt = `You are an AI assistant for ${$env.DEALERSHIP_NAME} in ${$env.DEALERSHIP_CITY}.\nSales contact: ${$env.SALESPERSON_NAME}, ${$env.SALESPERSON_PHONE}\nHours: ${$env.DEALERSHIP_HOURS}\n\nCURRENT AVAILABLE INVENTORY:\n${inventoryList || '(No inventory loaded)'}\n\nRULES:\n- SMS under 160 characters unless the content truly requires more\n- Professional but warm -- not pushy, not robotic\n- Never use em dashes\n- No filler phrases\n- Always include a clear next step or question\n- Never lie about inventory availability\n\nOUTPUT FORMAT: JSON only\n{ \"sms_text\": \"...\", \"intent_score\": \"hot|warm|cold\", \"intent_reasoning\": \"...\" }\n\nINTENT DEFINITIONS:\nhot: asking for price/availability, wants test drive, ready to buy soon\nwarm: engaged and asking questions, comparing options\ncold: no reply yet, vague interest`;\n\nconst userMessage = `LEAD CONTEXT:\nName: ${lead.first_name} ${lead.last_name || ''}\nSource: ${lead.source}\nVehicle interest: ${lead.vehicle_interest || '(not specified)'}\nTrigger: inbound_reply\nLast 3 messages:\\n${prepData._last_messages || '(none)'}\nLast lead reply: ${prepData._last_reply}\n\nTRIGGER INSTRUCTIONS: ${TRIGGER_INSTRUCTIONS.inbound_reply}`;\n\nreturn [{ json: { lead, systemPrompt, userMessage } }];"
+      },
+      "id": "build-inbound-prompt",
+      "name": "Build Inbound Claude Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-haiku-4-5-20251001\",\n  \"max_tokens\": 256,\n  \"system\": {{ JSON.stringify($json.systemPrompt) }},\n  \"messages\": [{\"role\": \"user\", \"content\": {{ JSON.stringify($json.userMessage) }} }]\n}",
+        "options": {}
+      },
+      "id": "claude-inbound",
+      "name": "Claude API (Inbound)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2660, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Evaluate Lead State').first().json;\nconst claudeResponse = $input.first().json;\n\nlet parsed;\ntry {\n  parsed = JSON.parse(claudeResponse.content[0].text.trim());\n} catch (e) {\n  parsed = {\n    sms_text: `Thanks for reaching out! ${$env.SALESPERSON_NAME} will get back to you shortly.`,\n    intent_score: 'warm',\n    intent_reasoning: 'Fallback: Claude returned invalid JSON on inbound'\n  };\n}\n\n// Determine new stage based on intent\nlet newStage = lead.stage;\nlet clearFollowUp = false;\nlet newFollowUp = null;\n\nif (parsed.intent_score === 'hot') {\n  newStage = 'hot';\n  clearFollowUp = true;\n} else if (parsed.intent_score === 'warm') {\n  newStage = 'warm';\n  clearFollowUp = true; // Pause sequence, rep should monitor\n} else {\n  // Cold reply still upgrades to warm (they replied)\n  newStage = 'warm';\n  newFollowUp = new Date(Date.now() + 3 * 86400000).toISOString();\n}\n\nreturn [{ json: {\n  lead_id: lead.id,\n  phone: lead.phone,\n  sms_text: parsed.sms_text,\n  intent_score: parsed.intent_score,\n  new_stage: newStage,\n  next_follow_up: clearFollowUp ? null : newFollowUp,\n  is_hot: parsed.intent_score === 'hot',\n  salesperson_alerted: lead.salesperson_alerted,\n  demo_mode: lead.demo_mode\n}}];"
+      },
+      "id": "parse-inbound-claude",
+      "name": "Parse Inbound Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2880, 480]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "demo-check",
+              "leftValue": "={{ $json.demo_mode }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-demo-inbound",
+      "name": "Demo Mode? (Inbound)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3100, 480]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "from": "={{ $env.TWILIO_FROM_NUMBER }}",
+        "to": "={{ $('Parse Inbound Response').first().json.phone }}",
+        "body": "={{ $('Parse Inbound Response').first().json.sms_text }}"
+      },
+      "id": "twilio-reply",
+      "name": "Twilio Reply SMS",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [3320, 400],
+      "credentials": {
+        "twilioApi": { "id": "TWILIO_CREDENTIAL_ID", "name": "Twilio" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Parse Inbound Response').first().json;\nreturn [{ json: { ...data, sms_text: '[DEMO] ' + data.sms_text } }];"
+      },
+      "id": "demo-prefix-inbound",
+      "name": "Demo Prefix (Inbound)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3320, 560]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sms_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ $('Parse Inbound Response').first().json.lead_id }}\",\n  \"direction\": \"outbound\",\n  \"body\": {{ JSON.stringify($json.sms_text || $('Parse Inbound Response').first().json.sms_text) }},\n  \"trigger_type\": \"inbound_reply\",\n  \"intent_score\": \"{{ $('Parse Inbound Response').first().json.intent_score }}\",\n  \"demo\": {{ $('Parse Inbound Response').first().json.demo_mode }}\n}",
+        "options": {}
+      },
+      "id": "log-outbound-reply",
+      "name": "Log Outbound Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3540, 480]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $('Parse Inbound Response').first().json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"intent_score\": \"{{ $('Parse Inbound Response').first().json.intent_score }}\",\n  \"stage\": \"{{ $('Parse Inbound Response').first().json.new_stage }}\",\n  \"next_follow_up\": {{ $('Parse Inbound Response').first().json.next_follow_up ? '\"' + $('Parse Inbound Response').first().json.next_follow_up + '\"' : 'null' }}\n}",
+        "options": {}
+      },
+      "id": "update-lead-inbound",
+      "name": "Update Lead (Inbound)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3760, 480]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "hot-check",
+              "leftValue": "={{ $('Parse Inbound Response').first().json.is_hot }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            },
+            {
+              "id": "not-alerted",
+              "leftValue": "={{ $('Parse Inbound Response').first().json.salesperson_alerted }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-hot-inbound",
+      "name": "Hot + Not Alerted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3980, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_HOT_LEAD }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ $('Parse Inbound Response').first().json.lead_id }}\"\n}",
+        "options": {}
+      },
+      "id": "trigger-hot-inbound",
+      "name": "Trigger WF05 Hot Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4200, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"processed\" }",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [4420, 480]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"unknown_phone\" }",
+        "options": {}
+      },
+      "id": "respond-unknown",
+      "name": "Respond Unknown",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1340, 620]
+    }
+  ],
+  "connections": {
+    "Twilio Inbound Webhook": { "main": [[{ "node": "Parse Twilio Payload", "type": "main", "index": 0 }]] },
+    "Parse Twilio Payload": { "main": [[{ "node": "Find Lead by Phone", "type": "main", "index": 0 }]] },
+    "Find Lead by Phone": { "main": [[{ "node": "Evaluate Lead State", "type": "main", "index": 0 }]] },
+    "Evaluate Lead State": { "main": [[{ "node": "Route by Action", "type": "main", "index": 0 }]] },
+    "Route by Action": {
+      "main": [
+        [{ "node": "Mark Opted Out", "type": "main", "index": 0 }, { "node": "Log Opt-Out Inbound", "type": "main", "index": 0 }],
+        [{ "node": "Log Inbound (Autopilot Off)", "type": "main", "index": 0 }],
+        [{ "node": "Log Inbound Message", "type": "main", "index": 0 }],
+        [{ "node": "Respond Unknown", "type": "main", "index": 0 }]
+      ]
+    },
+    "Mark Opted Out": { "main": [[{ "node": "Send Opt-Out Confirmation", "type": "main", "index": 0 }]] },
+    "Send Opt-Out Confirmation": { "main": [[{ "node": "Respond Opt-Out", "type": "main", "index": 0 }]] },
+    "Log Inbound (Autopilot Off)": { "main": [[{ "node": "Update last_reply_at (Passive)", "type": "main", "index": 0 }]] },
+    "Update last_reply_at (Passive)": { "main": [[{ "node": "Respond Passive", "type": "main", "index": 0 }]] },
+    "Log Inbound Message": { "main": [[{ "node": "Update last_reply_at", "type": "main", "index": 0 }]] },
+    "Update last_reply_at": { "main": [[{ "node": "Fetch Last 3 Messages", "type": "main", "index": 0 }]] },
+    "Fetch Last 3 Messages": { "main": [[{ "node": "Prep SMS Engine Call", "type": "main", "index": 0 }]] },
+    "Prep SMS Engine Call": { "main": [[{ "node": "Fetch Inventory", "type": "main", "index": 0 }]] },
+    "Fetch Inventory": { "main": [[{ "node": "Build Inbound Claude Prompt", "type": "main", "index": 0 }]] },
+    "Build Inbound Claude Prompt": { "main": [[{ "node": "Claude API (Inbound)", "type": "main", "index": 0 }]] },
+    "Claude API (Inbound)": { "main": [[{ "node": "Parse Inbound Response", "type": "main", "index": 0 }]] },
+    "Parse Inbound Response": { "main": [[{ "node": "Demo Mode? (Inbound)", "type": "main", "index": 0 }]] },
+    "Demo Mode? (Inbound)": {
+      "main": [
+        [{ "node": "Demo Prefix (Inbound)", "type": "main", "index": 0 }],
+        [{ "node": "Twilio Reply SMS", "type": "main", "index": 0 }]
+      ]
+    },
+    "Twilio Reply SMS": { "main": [[{ "node": "Log Outbound Reply", "type": "main", "index": 0 }]] },
+    "Demo Prefix (Inbound)": { "main": [[{ "node": "Log Outbound Reply", "type": "main", "index": 0 }]] },
+    "Log Outbound Reply": { "main": [[{ "node": "Update Lead (Inbound)", "type": "main", "index": 0 }]] },
+    "Update Lead (Inbound)": { "main": [[{ "node": "Hot + Not Alerted?", "type": "main", "index": 0 }]] },
+    "Hot + Not Alerted?": {
+      "main": [
+        [{ "node": "Trigger WF05 Hot Lead", "type": "main", "index": 0 }],
+        [{ "node": "Respond OK", "type": "main", "index": 0 }]
+      ]
+    },
+    "Trigger WF05 Hot Lead": { "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "DealerCRM" }]
+}

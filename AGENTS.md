@@ -20,7 +20,7 @@ Custom CRM replacing AutoRaptor for Eli Doueri's car dealership (Style Auto, Que
 
 - **Strategy:** Demo-first. Fake leads. Show client. Get sign-off. Swap credentials. Invoice.
 - **Budget:** $2,000 client / ~$1,800 after fees
-- **Client cost:** ~$28-35/month (Supabase + Twilio + n8n + Claude API)
+- **Client cost:** ~$28-35/month (Supabase + Twilio + n8n + Codex API)
 
 ## Stack
 
@@ -31,7 +31,7 @@ Custom CRM replacing AutoRaptor for Eli Doueri's car dealership (Style Auto, Que
 | Automation | n8n (5 SMS workflows spec'd + WF06 form intake built) |
 | SMS | Twilio |
 | Email | Resend (auto-reply emails from form intake) |
-| AI | Claude API (Haiku) |
+| AI | Codex API (Haiku) |
 | Hosting | Vercel via GitHub |
 
 ## Key Files (read on-demand, not preloaded)
@@ -61,7 +61,7 @@ Login, Leads, LeadDetail, Pipeline, Dashboard, Team, Schedule, Inventory
 
 - **Embeddable form** (`public/embed/dealercrm-form.js`) — shadow DOM, `data-company-id` + `data-webhook-url` attrs
 - **Mock site** (`public/embed/mock-dealership.html`) — test page with the form embed
-- **n8n WF06** (`workflows/eli-doueri/n8n/06-form-intake-email.json`) — form → lead insert → activity log → Claude email → Resend → respond
+- **n8n WF06** (`workflows/eli-doueri/n8n/06-form-intake-email.json`) — form → lead insert → activity log → Codex email → Resend → respond
 - **DB migration** (`supabase/003_companies_activity.sql`) — `companies` table, `activity_log` table, `company_id` on leads
 - **Activity tab** in LeadDetail.jsx — timeline of form_submitted, ai_auto_reply_sent, email_opened, email_clicked events
 
@@ -77,7 +77,7 @@ Login, Leads, LeadDetail, Pipeline, Dashboard, Team, Schedule, Inventory
 ## Tools
 
 - `tools/simulate_lead.py` — fire fake leads at n8n WF01 webhook
-- `tools/test_claude_prompt.py` — test Claude SMS prompt locally
+- `tools/test_claude_prompt.py` — test Codex SMS prompt locally
 - `tools/test_form_pipeline.py` — test WF06 form intake pipeline
 
 ## Environment Variables
@@ -86,14 +86,14 @@ See `.env.example`. Frontend uses `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`
 
 ## Communication Rules
 
-Rules in `.claude/rules/`. Default: bullet points, short, casual internally, professional externally.
+Rules in `.Codex/rules/`. Default: bullet points, short, casual internally, professional externally.
 
 ## Skills Architecture
 
 Skills are bundled capabilities: instructions (SKILL.md) + scripts. They separate decision-making from execution.
 
 **How it works:**
-1. Skills live in `.claude/skills/` — each has a `SKILL.md` with instructions
+1. Skills live in `.Codex/skills/` — each has a `SKILL.md` with instructions
 2. You (the agent) route to the right skill based on the task
 3. Skills have their own rules and constraints (e.g., file read budgets)
 
@@ -114,7 +114,7 @@ Don't create new skills without asking Kaleel first.
 
 ## Agents
 
-Agents live in `.claude/agents/`. They're focused sub-agents for specific tasks.
+Agents live in `.Codex/agents/`. They're focused sub-agents for specific tasks.
 
 | Agent | Purpose |
 |-------|---------|

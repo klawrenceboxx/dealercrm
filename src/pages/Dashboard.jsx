@@ -1,188 +1,387 @@
 import { useEffect, useState } from "react";
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { supabase } from "../lib/supabase";
 
+const WINDOW_DAYS = 30;
+
 export default function Dashboard() {
-  const [leads, setLeads] = useState([]);
+  const [dailyMetrics, setDailyMetrics] = useState([]);
+  const [repKpis, setRepKpis] = useState([]);
+  const [salesLeads, setSalesLeads] = useState([]);
+  const [profiles, setProfiles] = useState([]);
+  const [selectedRepId, setSelectedRepId] = useState("all");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    async function fetchLeads() {
-      const { data } = await supabase
-        .from("leads")
-        .select("stage, intent_score, source, created_at");
-      setLeads(data || []);
+    async function fetchDashboard() {
+      setLoading(true);
+      setError("");
+
+      const [dailyRes, kpiRes, salesRes, profilesRes] = await Promise.all([
+        supabase.rpc("rep_daily_metrics", { p_days: WINDOW_DAYS }),
+        supabase.rpc("rep_kpi_metrics", { p_days: WINDOW_DAYS }),
+        supabase
+          .from("leads")
+          .select("id, stage, assigned_to, sold_price, cost_of_car, recon_cost"),
+        supabase
+          .from("profiles")
+          .select("id, name, full_name"),
+      ]);
+
+      setDailyMetrics(dailyRes.error ? [] : (dailyRes.data || []));
+      setRepKpis(kpiRes.error ? [] : (kpiRes.data || []).filter((row) => row.rep_id));
+      setSalesLeads(salesRes.error ? [] : (salesRes.data || []));
+      setProfiles(profilesRes.error ? [] : (profilesRes.data || []));
+      setSelectedRepId((current) => (
+        current === "all" || (kpiRes.data || []).some((row) => row.rep_id === current) ? current : "all"
+      ));
+      setError(
+        dailyRes.error?.message
+        || kpiRes.error?.message
+        || salesRes.error?.message
+        || profilesRes.error?.message
+        || "",
+      );
       setLoading(false);
     }
-    fetchLeads();
+
+    fetchDashboard();
   }, []);
 
   if (loading) return <div className="p-6 text-sm" style={{ color: "#94a3b8" }}>Loading...</div>;
 
-  const total = leads.length;
-  const hot = leads.filter((l) => l.stage === "hot").length;
-  const closed = leads.filter((l) => l.stage === "closed").length;
-  const conversionRate = total > 0 ? Math.round((closed / total) * 100) : 0;
+  const selectedSummary = selectedRepId === "all"
+    ? aggregateSummary(repKpis)
+    : repKpis.find((row) => row.rep_id === selectedRepId) || emptySummary();
 
-  const byStage = countBy(leads, "stage");
-  const bySource = countBy(leads, "source");
-  const byIntent = countBy(leads, "intent_score");
+  const chartData = selectedRepId === "all"
+    ? aggregateDailyMetrics(dailyMetrics)
+    : dailyMetrics
+        .filter((row) => row.rep_id === selectedRepId)
+        .map((row) => ({
+          metric_date: row.metric_date,
+          label: shortDate(row.metric_date),
+          assigned: Number(row.leads_assigned || 0),
+          responses: Number(row.responses || 0),
+          deals: Number(row.deals_closed || 0),
+        }));
 
-  const now = new Date();
-  const dailyCounts = [];
-  for (let i = 13; i >= 0; i--) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const label = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-    const count = leads.filter((l) => new Date(l.created_at).toDateString() === d.toDateString()).length;
-    dailyCounts.push({ label, count });
-  }
-  const maxCount = Math.max(...dailyCounts.map((d) => d.count), 1);
+  const leaderboard = [...repKpis].sort((a, b) => {
+    if ((b.response_rate || 0) !== (a.response_rate || 0)) {
+      return (b.response_rate || 0) - (a.response_rate || 0);
+    }
 
-  return (
-    <div className="p-6 max-w-4xl">
-      <div className="mb-6">
-        <h1 className="text-lg font-semibold" style={{ color: "#0f172a" }}>Dashboard</h1>
-        <p className="text-sm mt-0.5" style={{ color: "#64748b" }}>Lead performance overview</p>
-      </div>
+    return (b.assigned_leads || 0) - (a.assigned_leads || 0);
+  });
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        <StatCard
-          label="Total Leads"
-          value={total}
-          icon={
-            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" />
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
-            </svg>
-          }
-          iconBg="#eff6ff"
-          iconColor="#2563eb"
-        />
-        <StatCard
-          label="Hot Leads"
-          value={hot}
-          icon={
-            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" />
-              <path d="M12 6v6l4 2" />
-            </svg>
-          }
-          iconBg="#fff1f2"
-          iconColor="#dc2626"
-          valueColor="#dc2626"
-        />
-        <StatCard
-          label="Closed"
-          value={closed}
-          icon={
-            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-          }
-          iconBg="#f0fdf4"
-          iconColor="#16a34a"
-          valueColor="#16a34a"
-        />
-        <StatCard
-          label="Conversion"
-          value={`${conversionRate}%`}
-          icon={
-            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-              <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" />
-            </svg>
-          }
-          iconBg="#f5f3ff"
-          iconColor="#7c3aed"
-        />
-      </div>
-
-      {/* Breakdown cards */}
-      <div className="grid grid-cols-3 gap-4 mb-4">
-        <BreakdownCard title="By Stage" data={byStage} />
-        <BreakdownCard title="By Source" data={bySource} />
-        <BreakdownCard title="By Intent" data={byIntent} />
-      </div>
-
-      {/* Chart */}
-      <div className="bg-white rounded-xl p-5" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
-        <h3 className="text-sm font-semibold mb-4" style={{ color: "#0f172a" }}>Leads — last 14 days</h3>
-        <div className="flex items-end gap-1.5" style={{ height: "100px" }}>
-          {dailyCounts.map(({ label, count }) => {
-            const pct = Math.round((count / maxCount) * 100);
-            return (
-              <div key={label} className="flex-1 flex flex-col items-center justify-end gap-1" style={{ height: "100%" }}>
-                <div
-                  className="w-full rounded-t transition-all"
-                  style={{
-                    height: count > 0 ? `${pct}%` : "2px",
-                    backgroundColor: count > 0 ? "#2563eb" : "#e2e8f0",
-                    minHeight: "2px",
-                  }}
-                />
-                <span style={{ fontSize: "9px", color: "#94a3b8", whiteSpace: "nowrap" }}>
-                  {label.split(" ")[1]}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
+  const soldLeads = salesLeads.filter((lead) => lead.stage === "closed");
+  const totalSoldRevenue = sumBy(soldLeads, (lead) => lead.sold_price);
+  const totalCarCost = sumBy(soldLeads, (lead) => lead.cost_of_car);
+  const totalRecon = sumBy(soldLeads, (lead) => lead.recon_cost);
+  const totalProfit = soldLeads.reduce(
+    (sum, lead) => sum + getProfit(lead.sold_price, lead.cost_of_car, lead.recon_cost),
+    0,
   );
-}
-
-function StatCard({ label, value, icon, iconBg, iconColor, valueColor }) {
-  return (
-    <div className="bg-white rounded-xl p-4" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
-      <div className="flex items-center justify-between mb-3">
-        <p className="text-xs font-medium" style={{ color: "#64748b" }}>{label}</p>
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: iconBg, color: iconColor }}>
-          {icon}
-        </div>
-      </div>
-      <p className="text-2xl font-semibold" style={{ color: valueColor || "#0f172a" }}>{value}</p>
-    </div>
+  const profileMap = Object.fromEntries(
+    profiles.map((profile) => [profile.id, profile.full_name || profile.name || "Unknown rep"]),
   );
-}
+  const salesBreakdown = Object.values(
+    soldLeads.reduce((acc, lead) => {
+      const key = lead.assigned_to || "unassigned";
 
-function BreakdownCard({ title, data }) {
-  const total = Object.values(data).reduce((a, b) => a + b, 0);
+      if (!acc[key]) {
+        acc[key] = {
+          key,
+          repName: lead.assigned_to ? profileMap[lead.assigned_to] || "Unknown rep" : "Unassigned",
+          deals: 0,
+          sold: 0,
+          carCost: 0,
+          recon: 0,
+          profit: 0,
+        };
+      }
+
+      acc[key].deals += 1;
+      acc[key].sold += toNumber(lead.sold_price);
+      acc[key].carCost += toNumber(lead.cost_of_car);
+      acc[key].recon += toNumber(lead.recon_cost);
+      acc[key].profit += getProfit(lead.sold_price, lead.cost_of_car, lead.recon_cost);
+      return acc;
+    }, {}),
+  ).sort((a, b) => b.profit - a.profit);
+
   return (
-    <div className="bg-white rounded-xl p-4" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
-      <h3 className="text-sm font-semibold mb-3" style={{ color: "#0f172a" }}>{title}</h3>
-      {total === 0 ? (
-        <p className="text-xs" style={{ color: "#94a3b8" }}>No data yet</p>
-      ) : (
-        <div className="space-y-2.5">
-          {Object.entries(data)
-            .sort((a, b) => b[1] - a[1])
-            .map(([key, count]) => (
-              <div key={key} className="flex items-center gap-2">
-                <span className="text-xs capitalize truncate" style={{ color: "#475569", minWidth: "64px" }}>{key || "unknown"}</span>
-                <div className="flex-1 rounded-full" style={{ backgroundColor: "#f1f5f9", height: "6px" }}>
-                  <div
-                    className="rounded-full"
-                    style={{
-                      width: `${Math.round((count / total) * 100)}%`,
-                      height: "6px",
-                      backgroundColor: "#2563eb",
-                    }}
-                  />
-                </div>
-                <span className="text-xs font-medium" style={{ color: "#64748b", minWidth: "16px", textAlign: "right" }}>{count}</span>
-              </div>
+    <div className="p-6 max-w-6xl">
+      <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <h1 className="text-lg font-semibold" style={{ color: "#0f172a" }}>Dashboard</h1>
+          <p className="text-sm mt-0.5" style={{ color: "#64748b" }}>
+            Rep performance over the last {WINDOW_DAYS} days
+          </p>
+        </div>
+
+        <label className="text-sm font-medium flex flex-col gap-1.5" style={{ color: "#475569" }}>
+          Rep view
+          <select
+            value={selectedRepId}
+            onChange={(e) => setSelectedRepId(e.target.value)}
+            className="min-w-52 rounded-lg border px-3 py-2 text-sm bg-white focus:outline-none"
+            style={{ borderColor: "#e2e8f0", color: "#0f172a" }}
+          >
+            <option value="all">All reps</option>
+            {repKpis.map((row) => (
+              <option key={row.rep_id} value={row.rep_id}>
+                {row.rep_name}
+              </option>
             ))}
+          </select>
+        </label>
+      </div>
+
+      {error && (
+        <div className="mb-6 rounded-xl border px-4 py-3 text-sm" style={{ borderColor: "#fecaca", color: "#b91c1c", backgroundColor: "#fef2f2" }}>
+          {error}
         </div>
       )}
+
+      <div className="grid gap-4 mb-6 md:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Total Sold" value={formatCurrency(totalSoldRevenue)} accent="#2563eb" />
+        <StatCard label="Total Profit" value={formatCurrency(totalProfit)} accent={totalProfit >= 0 ? "#16a34a" : "#dc2626"} />
+        <StatCard label="Cost Of Car" value={formatCurrency(totalCarCost)} accent="#ea580c" />
+        <StatCard label="Recon Costs" value={formatCurrency(totalRecon)} accent="#dc2626" />
+      </div>
+
+      <div className="bg-white rounded-xl p-5 mb-6 overflow-x-auto" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+        <div className="mb-4">
+          <h2 className="text-sm font-semibold" style={{ color: "#0f172a" }}>Per-rep sales breakdown</h2>
+          <p className="text-xs mt-1" style={{ color: "#64748b" }}>Closed deals with sold totals, car cost, recon, and profit.</p>
+        </div>
+
+        {salesBreakdown.length === 0 ? (
+          <p className="text-sm" style={{ color: "#94a3b8" }}>No sold leads with financial data yet.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1px solid #f1f5f9" }}>
+                {["Rep", "Deals", "Total Sold", "Car Cost", "Recon", "Profit"].map((heading) => (
+                  <th key={heading} className="text-left py-3 text-xs font-semibold" style={{ color: "#64748b" }}>{heading}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {salesBreakdown.map((row, index) => (
+                <tr key={row.key} style={{ borderTop: index > 0 ? "1px solid #f8fafc" : "none" }}>
+                  <td className="py-3 font-medium" style={{ color: "#0f172a" }}>{row.repName}</td>
+                  <td className="py-3" style={{ color: "#475569" }}>{row.deals}</td>
+                  <td className="py-3" style={{ color: "#475569" }}>{formatCurrency(row.sold)}</td>
+                  <td className="py-3" style={{ color: "#475569" }}>{formatCurrency(row.carCost)}</td>
+                  <td className="py-3" style={{ color: "#475569" }}>{formatCurrency(row.recon)}</td>
+                  <td className="py-3 font-semibold" style={{ color: row.profit >= 0 ? "#16a34a" : "#dc2626" }}>
+                    {formatCurrency(row.profit)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="grid gap-4 mb-6 md:grid-cols-2 xl:grid-cols-5">
+        <StatCard label="Leads Assigned" value={selectedSummary.assigned_leads} accent="#2563eb" />
+        <StatCard label="Responses Logged" value={selectedSummary.responded_leads} accent="#0f766e" />
+        <StatCard label="Deals Closed" value={selectedSummary.deals_closed} accent="#16a34a" />
+        <StatCard label="Response Rate" value={`${selectedSummary.response_rate.toFixed(1)}%`} accent="#7c3aed" />
+        <StatCard label="Avg Response Time" value={formatDuration(selectedSummary.avg_response_minutes)} accent="#ea580c" />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_340px]">
+        <div className="bg-white rounded-xl p-5" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+          <div className="mb-4">
+            <h2 className="text-sm font-semibold" style={{ color: "#0f172a" }}>
+              {selectedRepId === "all" ? "Team trend" : `${selectedSummary.rep_name} trend`}
+            </h2>
+            <p className="text-xs mt-1" style={{ color: "#64748b" }}>
+              Leads assigned, rep responses, and deals closed over time
+            </p>
+          </div>
+
+          {chartData.length === 0 ? (
+            <div className="rounded-xl border border-dashed px-4 py-12 text-center text-sm" style={{ color: "#94a3b8", borderColor: "#cbd5e1" }}>
+              No event data yet.
+            </div>
+          ) : (
+            <div style={{ height: "340px" }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData} margin={{ top: 8, right: 12, left: -12, bottom: 0 }}>
+                  <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" />
+                  <XAxis dataKey="label" tick={{ fill: "#64748b", fontSize: 12 }} tickLine={false} axisLine={false} />
+                  <YAxis allowDecimals={false} tick={{ fill: "#64748b", fontSize: 12 }} tickLine={false} axisLine={false} />
+                  <Tooltip
+                    contentStyle={{ borderRadius: "12px", borderColor: "#e2e8f0", boxShadow: "0 10px 30px rgba(15,23,42,0.08)" }}
+                    labelStyle={{ color: "#0f172a", fontWeight: 600 }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: "12px" }} />
+                  <Line type="monotone" dataKey="assigned" name="Assigned" stroke="#2563eb" strokeWidth={3} dot={false} />
+                  <Line type="monotone" dataKey="responses" name="Responses" stroke="#0f766e" strokeWidth={3} dot={false} />
+                  <Line type="monotone" dataKey="deals" name="Deals" stroke="#16a34a" strokeWidth={3} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-xl p-5" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+          <div className="mb-4">
+            <h2 className="text-sm font-semibold" style={{ color: "#0f172a" }}>Rep leaderboard</h2>
+            <p className="text-xs mt-1" style={{ color: "#64748b" }}>Response rate and speed by rep</p>
+          </div>
+
+          <div className="space-y-3">
+            {leaderboard.length === 0 ? (
+              <p className="text-sm" style={{ color: "#94a3b8" }}>No rep activity yet.</p>
+            ) : (
+              leaderboard.map((row) => {
+                const selected = row.rep_id === selectedRepId;
+
+                return (
+                  <button
+                    key={row.rep_id}
+                    type="button"
+                    onClick={() => setSelectedRepId(row.rep_id)}
+                    className="w-full rounded-xl border p-4 text-left transition-colors"
+                    style={{
+                      borderColor: selected ? "#bfdbfe" : "#e2e8f0",
+                      backgroundColor: selected ? "#eff6ff" : "white",
+                    }}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold" style={{ color: "#0f172a" }}>{row.rep_name}</p>
+                        <p className="text-xs mt-1" style={{ color: "#64748b" }}>
+                          {row.assigned_leads} assigned · {row.responded_leads} responded
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-semibold" style={{ color: "#2563eb" }}>{Number(row.response_rate || 0).toFixed(1)}%</p>
+                        <p className="text-xs mt-1" style={{ color: "#64748b" }}>{formatDuration(row.avg_response_minutes)}</p>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
 
-function countBy(arr, key) {
-  return arr.reduce((acc, item) => {
-    const val = item[key] || "unknown";
-    acc[val] = (acc[val] || 0) + 1;
+function StatCard({ label, value, accent }) {
+  return (
+    <div className="bg-white rounded-xl p-4" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+      <p className="text-xs font-medium" style={{ color: "#64748b" }}>{label}</p>
+      <p className="text-2xl font-semibold mt-2" style={{ color: accent }}>{value}</p>
+    </div>
+  );
+}
+
+function aggregateSummary(rows) {
+  const assigned = rows.reduce((sum, row) => sum + Number(row.assigned_leads || 0), 0);
+  const responded = rows.reduce((sum, row) => sum + Number(row.responded_leads || 0), 0);
+  const deals = rows.reduce((sum, row) => sum + Number(row.deals_closed || 0), 0);
+  const weightedMinutes = rows.reduce(
+    (sum, row) => sum + (Number(row.avg_response_minutes || 0) * Number(row.responded_leads || 0)),
+    0,
+  );
+
+  return {
+    rep_name: "All reps",
+    assigned_leads: assigned,
+    responded_leads: responded,
+    deals_closed: deals,
+    response_rate: assigned > 0 ? (responded / assigned) * 100 : 0,
+    avg_response_minutes: responded > 0 ? weightedMinutes / responded : 0,
+  };
+}
+
+function aggregateDailyMetrics(rows) {
+  const byDate = rows.reduce((acc, row) => {
+    const key = row.metric_date;
+
+    if (!acc[key]) {
+      acc[key] = {
+        metric_date: row.metric_date,
+        label: shortDate(row.metric_date),
+        assigned: 0,
+        responses: 0,
+        deals: 0,
+      };
+    }
+
+    acc[key].assigned += Number(row.leads_assigned || 0);
+    acc[key].responses += Number(row.responses || 0);
+    acc[key].deals += Number(row.deals_closed || 0);
+
     return acc;
   }, {});
+
+  return Object.values(byDate).sort((a, b) => new Date(a.metric_date) - new Date(b.metric_date));
+}
+
+function shortDate(value) {
+  return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function formatDuration(minutes) {
+  const safeMinutes = Number(minutes || 0);
+
+  if (!safeMinutes) return "No responses";
+  if (safeMinutes < 60) return `${safeMinutes.toFixed(0)} min`;
+
+  const hours = safeMinutes / 60;
+  if (hours < 24) return `${hours.toFixed(1)} hr`;
+
+  return `${(hours / 24).toFixed(1)} d`;
+}
+
+function emptySummary() {
+  return {
+    rep_name: "Unknown rep",
+    assigned_leads: 0,
+    responded_leads: 0,
+    deals_closed: 0,
+    response_rate: 0,
+    avg_response_minutes: 0,
+  };
+}
+
+function toNumber(value) {
+  return Number(value) || 0;
+}
+
+function getProfit(soldPrice, carCost, reconCost) {
+  return toNumber(soldPrice) - toNumber(carCost) - toNumber(reconCost);
+}
+
+function sumBy(items, getter) {
+  return items.reduce((sum, item) => sum + toNumber(getter(item)), 0);
+}
+
+function formatCurrency(value) {
+  return new Intl.NumberFormat("en-CA", {
+    style: "currency",
+    currency: "CAD",
+    maximumFractionDigits: 0,
+  }).format(value || 0);
 }

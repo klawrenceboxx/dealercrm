@@ -1,0 +1,358 @@
+{
+  "name": "[02] AI SMS Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-sms-engine",
+        "responseMode": "lastNode",
+        "responseData": "noData",
+        "options": {}
+      },
+      "id": "6d4aad5f-80e1-401a-baf2-4a6df5f7fd5d",
+      "name": "Webhook1",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [208, 752],
+      "webhookId": "944613da-c6df-4a17-94d3-45a36d305f1e"
+    },
+    {
+      "parameters": {
+        "url": "=https://ntohjufkraavvvarqiyq.supabase.co/rest/v1/leads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "id", "value": "=eq.{{ $json.body.lead_id }}" },
+            { "name": "select", "value": "*" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "12ea4b38-c25d-42e0-afd3-c74bfeeb976d",
+      "name": "Get Lead1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [432, 656],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "https://ntohjufkraavvvarqiyq.supabase.co/rest/v1/inventory?status=eq.available&select=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1164acbe-03db-4855-b102-72c7ae53735c",
+      "name": "Get Inventory1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [432, 848]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "merge-lead-inventory",
+      "name": "Merge Lead + Inventory",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [656, 752]
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhook = $('Webhook1').first().json.body || $('Webhook1').first().json;\nconst leadRaw = $('Get Lead1').first().json;\nconst lead = Array.isArray(leadRaw) ? leadRaw[0] : leadRaw;\nconst invRaw = $('Get Inventory1').all().map(i => i.json);\nconst inventory = invRaw.length === 1 && Array.isArray(invRaw[0]) ? invRaw[0] : invRaw;\n\nif (!lead || !lead.id) {\n  throw new Error('Lead not found: ' + JSON.stringify(leadRaw));\n}\n\nconst inventoryText = inventory\n  .filter(v => v && v.status === 'available')\n  .map(v => `${v.year} ${v.make} ${v.model} ${v.trim || ''} — ${v.color || ''} — ${v.mileage ? v.mileage.toLocaleString()+' km' : 'New'} — $${Number(v.price||0).toLocaleString()}`)\n  .join('\\n') || 'No inventory data';\n\nconst instructions = {\n  first_contact:    'First message. Briefly introduce yourself, reference vehicle interest if provided, ask one qualifying question. Sign with first name.',\n  follow_up_day3:   'No reply in 3 days. Short friendly check-in. One question. Under 100 chars if possible.',\n  follow_up_day7:   'No reply in 7 days. Try a different angle — ask about timing or budget, not the specific vehicle.',\n  follow_up_day14:  'Two weeks no reply. Last real attempt. Keep it human and low-pressure.',\n  follow_up_day30:  'Final follow-up. Acknowledge time passed. Leave the door open.',\n  inbound_reply:    'Lead just replied. Respond naturally to what they said. Classify intent based on their message.',\n};\n\nconst trigger = webhook.trigger_type || 'first_contact';\nconst userMsg = `LEAD: ${lead.first_name} ${lead.last_name || ''} | Source: ${lead.source} | Vehicle: ${lead.vehicle_interest || 'not specified'} | Trigger: ${trigger}\\n\\nINVENTORY:\\n${inventoryText}\\n\\nINSTRUCTION: ${instructions[trigger] || instructions.first_contact}`;\n\nreturn [{ json: {\n  _ctx: { lead_id: lead.id, trigger_type: trigger, demo_mode: lead.demo_mode, phone: lead.phone, sequence_step: lead.sequence_step || 0, sms_count: lead.sms_count || 0, salesperson_alerted: lead.salesperson_alerted || false },\n  userMsg, lead,\n} }];"
+      },
+      "id": "8daa0dd3-ee19-4102-a3e7-b24aedc1dd7e",
+      "name": "Build Prompt1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 752]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'claude-haiku-4-5-20251001',\n  max_tokens: 256,\n  system: 'You are an SMS assistant for Style Auto in Quebec. Sales contact: Kaleel, +1 (647) 632-1709. Hours: Mon-Fri 9am-6pm, Sat 10am-4pm. RULES: Keep SMS under 160 chars. Professional but warm. No filler phrases. No em dashes. Always include a clear next step. Sign with first name on first contact only. Never lie about inventory. OUTPUT: JSON only — no other text. {\"sms_text\":\"...\",\"intent_score\":\"hot|warm|cold\",\"intent_reasoning\":\"...\"} hot=price/availability/test drive/ready to buy. warm=engaged/comparing/questions. cold=vague/no reply.',\n  messages: [{ role: 'user', content: $json.userMsg }]\n}) }}",
+        "options": {}
+      },
+      "id": "7b0108ee-8aef-4bdf-8e4a-648f5e51292f",
+      "name": "Call Claude1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1104, 752]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.content[0].text.trim();\nlet parsed;\ntry {\n  const cleaned = raw.replace(/^```json\\s*/i, '').replace(/```\\s*$/i, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch(e) {\n  parsed = { sms_text: \"Hi! We'd love to help you find the right vehicle. When's a good time to connect?\", intent_score: 'cold', intent_reasoning: 'fallback — could not parse Claude response' };\n}\nconst ctx = $('Build Prompt1').first().json._ctx;\nconst step = ctx.sequence_step || 0;\nconst days = [3, 4, 7, 16, null];\nconst nextDays = days[step] ?? null;\nconst nextFollowUp = nextDays ? new Date(Date.now() + nextDays * 86400000).toISOString() : null;\n\nlet newStage;\nif (parsed.intent_score === 'hot') newStage = 'hot';\nelse if (parsed.intent_score === 'warm') newStage = 'warm';\nelse if (step === 0) newStage = 'needs_reply';\nelse newStage = 'contacted';\nif (step >= 4 && !nextFollowUp) newStage = 'closed';\n\nreturn [{ json: {\n  lead_id: ctx.lead_id,\n  trigger_type: ctx.trigger_type,\n  demo_mode: ctx.demo_mode,\n  phone: ctx.phone,\n  sms_text: parsed.sms_text,\n  intent_score: parsed.intent_score || 'cold',\n  intent_reasoning: parsed.intent_reasoning || '',\n  new_stage: newStage,\n  next_follow_up: nextFollowUp,\n  next_step: step + 1,\n  sms_count: (ctx.sms_count || 0) + 1,\n  is_hot: parsed.intent_score === 'hot',\n  salesperson_alerted: ctx.salesperson_alerted,\n  now: new Date().toISOString(),\n} }];"
+      },
+      "id": "09a85c91-c896-409a-bd49-d5da7dfc140a",
+      "name": "Parse & Enrich1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1328, 752]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "5fc65e59-3ef2-4b05-840b-05047de9e2d5",
+              "leftValue": "={{ String($json.demo_mode) }}",
+              "rightValue": "true",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "be014b9f-8ece-4f8c-9787-c5c7a8688724",
+      "name": "Demo Mode?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1552, 752]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "authentication": "basicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/x-www-form-urlencoded" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "form",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "To", "value": "={{ $('Parse & Enrich1').first().json.phone }}" },
+            { "name": "From", "value": "={{ $env.TWILIO_FROM_NUMBER }}" },
+            { "name": "Body", "value": "={{ $('Parse & Enrich1').first().json.sms_text }}" }
+          ]
+        },
+        "options": {
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "55bb94e6-73a1-415a-9746-d94d55fe6066",
+      "name": "Send SMS1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1776, 896]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Demo mode: prepend [DEMO] and skip Twilio\nconst data = $('Parse & Enrich1').first().json;\nreturn [{ json: { ...data, sms_text: '[DEMO] ' + data.sms_text } }];"
+      },
+      "id": "demo-prefix",
+      "name": "Demo Prefix1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1776, 656]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ntohjufkraavvvarqiyq.supabase.co/rest/v1/sms_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  lead_id:      $('Parse & Enrich1').first().json.lead_id,\n  direction:    'outbound',\n  body:         $json.sms_text || $('Parse & Enrich1').first().json.sms_text,\n  intent_score: $('Parse & Enrich1').first().json.intent_score,\n  demo:         $('Parse & Enrich1').first().json.demo_mode,\n  trigger_type: $('Parse & Enrich1').first().json.trigger_type\n}) }}",
+        "options": {}
+      },
+      "id": "c67fe12c-252f-4f24-9d44-17c85950e7ae",
+      "name": "Log SMS1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2000, 752]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://ntohjufkraavvvarqiyq.supabase.co/rest/v1/leads?id=eq.{{ $('Parse & Enrich1').first().json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => {\n  const p = $('Parse & Enrich1').first().json;\n  const update = {\n    intent_score:   p.intent_score,\n    stage:          p.new_stage,\n    sequence_step:  p.next_step,\n    next_follow_up: p.next_follow_up,\n    last_sms_at:    p.now,\n    sms_count:      p.sms_count\n  };\n  return JSON.stringify(update);\n})() }}",
+        "options": {}
+      },
+      "id": "37bc5e89-b99e-4a7b-b8a1-8d79a5e8b86f",
+      "name": "Update Lead1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2224, 752]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "6ec7e675-6477-4758-aa8c-d44ac20cc36b",
+              "leftValue": "={{ $('Parse & Enrich1').first().json.is_hot }}",
+              "rightValue": "true",
+              "operator": { "type": "string", "operation": "equals" }
+            },
+            {
+              "id": "not-alerted",
+              "leftValue": "={{ String($('Parse & Enrich1').first().json.salesperson_alerted) }}",
+              "rightValue": "false",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "78c1d524-3984-4d9d-bb50-a630ca50c1cc",
+      "name": "Is Hot?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2448, 752]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook-test/hot-lead-alert",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ lead_id: $('Parse & Enrich1').first().json.lead_id }) }}",
+        "options": {}
+      },
+      "id": "e59e73f2-0a4c-4776-a7e5-7eede16d4ba4",
+      "name": "Alert Hot Lead1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2672, 752]
+    }
+  ],
+  "connections": {
+    "Webhook1": {
+      "main": [
+        [
+          { "node": "Get Lead1", "type": "main", "index": 0 },
+          { "node": "Get Inventory1", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Get Lead1": {
+      "main": [
+        [{ "node": "Merge Lead + Inventory", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Inventory1": {
+      "main": [
+        [{ "node": "Merge Lead + Inventory", "type": "main", "index": 1 }]
+      ]
+    },
+    "Merge Lead + Inventory": {
+      "main": [
+        [{ "node": "Build Prompt1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Prompt1": {
+      "main": [
+        [{ "node": "Call Claude1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call Claude1": {
+      "main": [
+        [{ "node": "Parse & Enrich1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse & Enrich1": {
+      "main": [
+        [{ "node": "Demo Mode?1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Demo Mode?1": {
+      "main": [
+        [{ "node": "Demo Prefix1", "type": "main", "index": 0 }],
+        [{ "node": "Send SMS1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send SMS1": {
+      "main": [
+        [{ "node": "Log SMS1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Demo Prefix1": {
+      "main": [
+        [{ "node": "Log SMS1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log SMS1": {
+      "main": [
+        [{ "node": "Update Lead1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update Lead1": {
+      "main": [
+        [{ "node": "Is Hot?1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is Hot?1": {
+      "main": [
+        [{ "node": "Alert Hot Lead1", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "DealerCRM" }],
+  "meta": {
+    "instanceId": "0c4c988cd6d2817777de04e44cf25738176912d68f6adf12abcaa341f3eb9cfc"
+  }
+}

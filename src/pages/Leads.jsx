@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 
@@ -35,11 +35,7 @@ export default function Leads() {
   const [stageFilter, setStageFilter] = useState("all");
   const navigate = useNavigate();
 
-  useEffect(() => {
-    fetchLeads();
-  }, []);
-
-  async function fetchLeads() {
+  const fetchLeads = useCallback(async () => {
     setLoading(true);
     const { data, error } = await supabase
       .from("leads")
@@ -48,7 +44,11 @@ export default function Leads() {
     if (error) console.error("Error fetching leads:", error);
     else setLeads(data || []);
     setLoading(false);
-  }
+  }, []);
+
+  useEffect(() => {
+    Promise.resolve().then(fetchLeads);
+  }, [fetchLeads]);
 
   const filtered = leads.filter((l) => {
     const name = `${l.first_name} ${l.last_name}`.toLowerCase();

@@ -1,0 +1,424 @@
+{
+  "name": "[06] Form Intake + Email Auto-Reply",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "form-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize incoming form data\nconst input = $input.first().json.body;\n\n// Normalize phone to E.164\nlet phone = (input.phone || '').replace(/[^\\d+]/g, '');\nif (phone && !phone.startsWith('+')) {\n  if (phone.length === 10) phone = '+1' + phone;\n  else if (phone.length === 11 && phone.startsWith('1')) phone = '+' + phone;\n}\n\n// Validate required fields\nconst errors = [];\nif (!input.first_name || !input.first_name.trim()) errors.push('first_name is required');\nif (!input.email || !input.email.trim()) errors.push('email is required');\nif (!phone) errors.push('phone is required');\n\nconst leadId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16); });\nconst assignedAt = new Date().toISOString();\n\nreturn [{\n  json: {\n    lead_id: leadId,\n    first_name: (input.first_name || '').trim(),\n    last_name: (input.last_name || '').trim(),\n    phone: phone || null,\n    email: (input.email || '').trim().toLowerCase(),\n    source: 'website_form',\n    vehicle_interest: (input.vehicle_interest || '').trim() || null,\n    message: (input.message || '').trim() || null,\n    company_id: input.company_id || null,\n    stage: 'new',\n    intent_score: 'cold',\n    sequence_step: 0,\n    demo_mode: true,\n    opted_out: false,\n    salesperson_alerted: false,\n    sms_count: 0,\n    autopilot_active: false,\n    assigned_at: assignedAt,\n    rep_response_at: null,\n    assigned_to: null,\n    _validation_errors: errors\n  }\n}];"
+      },
+      "id": "normalize",
+      "name": "Normalize Form Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "validation-check",
+              "leftValue": "={{ $json._validation_errors.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-invalid",
+      "name": "Has Validation Errors?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "email", "value": "=eq.{{ $json.email }}" },
+            { "name": "select", "value": "id,email" },
+            { "name": "limit", "value": "1" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "check-duplicate",
+      "name": "Check Duplicate Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Normalize Form Data').first().json;\nconst duplicates = $input.first().json;\nconst results = Array.isArray(duplicates) ? duplicates : [duplicates];\nconst isDuplicate = results.length > 0 && results[0]?.id;\n\nif (isDuplicate) {\n  return [{ json: { ...lead, _is_duplicate: true, _existing_id: results[0].id } }];\n}\nreturn [{ json: { ...lead, _is_duplicate: false } }];"
+      },
+      "id": "eval-duplicate",
+      "name": "Evaluate Duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "dup-check",
+              "leftValue": "={{ $json._is_duplicate }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-duplicate",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shift-aware round-robin assignment\nconst baseUrl = $env.SUPABASE_URL;\nconst key = $env.SUPABASE_SERVICE_ROLE_KEY;\nconst headers = {\n  'apikey': key,\n  'Authorization': `Bearer ${key}`,\n  'Content-Type': 'application/json',\n  'Prefer': 'return=representation'\n};\n\nfunction getMinutesInTimeZone(date, timeZone) {\n  const parts = new Intl.DateTimeFormat('en-CA', {\n    hour: '2-digit',\n    minute: '2-digit',\n    hour12: false,\n    timeZone: timeZone || 'America/Toronto'\n  }).formatToParts(date);\n\n  const hours = parseInt(parts.find(part => part.type === 'hour')?.value || '0', 10);\n  const minutes = parseInt(parts.find(part => part.type === 'minute')?.value || '0', 10);\n  return hours * 60 + minutes;\n}\n\nfunction isWorking(rep, date) {\n  if (!rep?.active) return false;\n  const start = Number(rep.shift_start_minutes);\n  const end = Number(rep.shift_end_minutes);\n  if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) return true;\n\n  const nowMinutes = getMinutesInTimeZone(date, rep.shift_timezone || 'America/Toronto');\n  if (start < end) {\n    return nowMinutes >= start && nowMinutes < end;\n  }\n\n  return nowMinutes >= start || nowMinutes < end;\n}\n\nconst repsRes = await fetch(`${baseUrl}/rest/v1/profiles?active=eq.true&select=id,name,rr_order,active,shift_start_minutes,shift_end_minutes,shift_timezone`, { headers });\nconst repsRaw = await repsRes.json();\nconst now = new Date();\nconst reps = (Array.isArray(repsRaw) ? repsRaw : [])\n  .filter(rep => isWorking(rep, now))\n  .sort((a, b) => {\n    const orderDiff = (a.rr_order ?? 0) - (b.rr_order ?? 0);\n    if (orderDiff !== 0) return orderDiff;\n    return (a.name || '').localeCompare(b.name || '');\n  });\n\nif (reps.length === 0) {\n  return [{ json: { ...$input.first().json, assigned_to: null, autopilot_active: true } }];\n}\n\nconst settingsRes = await fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index&select=value`, { headers });\nconst settings = await settingsRes.json();\nconst rawIndex = settings[0]?.value ?? 0;\nconst currentIndex = typeof rawIndex === 'number' ? rawIndex : parseInt(String(rawIndex).replace(/[^\\d-]/g, ''), 10) || 0;\nconst idx = ((currentIndex % reps.length) + reps.length) % reps.length;\nconst assignedRep = reps[idx];\nconst nextIndex = (idx + 1) % reps.length;\n\nawait fetch(`${baseUrl}/rest/v1/settings?key=eq.rr_index`, {\n  method: 'PATCH',\n  headers: { ...headers, 'Prefer': 'return=minimal' },\n  body: JSON.stringify({ value: nextIndex })\n});\n\nreturn [{ json: { ...$input.first().json, assigned_to: assignedRep.id, autopilot_active: false } }];"
+      },
+      "id": "round-robin",
+      "name": "Round Robin Assign",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ lead_id: $json.lead_id, first_name: $json.first_name, last_name: $json.last_name, phone: $json.phone, email: $json.email, source: 'website_form', vehicle_interest: $json.vehicle_interest, stage: 'new', intent_score: 'cold', sequence_step: 0, demo_mode: $json.demo_mode, opted_out: false, salesperson_alerted: false, sms_count: 0, autopilot_active: $json.autopilot_active, assigned_at: $json.assigned_at, rep_response_at: $json.rep_response_at, assigned_to: $json.assigned_to, company_id: $json.company_id }) }}",
+        "options": {}
+      },
+      "id": "insert-lead",
+      "name": "Insert Lead to Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/activity_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ lead_id: Array.isArray($json) ? $json[0].id : $json.id, company_id: $('Round Robin Assign').first().json.company_id, event_type: 'form_submitted', metadata: { source: 'website_form', first_name: $('Round Robin Assign').first().json.first_name, vehicle_interest: $('Round Robin Assign').first().json.vehicle_interest } }) }}",
+        "options": {}
+      },
+      "id": "log-form-submitted",
+      "name": "Log: form_submitted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 100]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/inventory",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "status", "value": "=eq.available" },
+            { "name": "select", "value": "vehicle,year,make,model,trim,color,mileage,price" },
+            { "name": "limit", "value": "10" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-inventory",
+      "name": "Fetch Available Inventory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Round Robin Assign').first().json;\nconst inventoryRaw = $input.first().json;\nconst inventory = Array.isArray(inventoryRaw) ? inventoryRaw : [inventoryRaw];\n\nconst inventoryList = inventory\n  .filter(v => v && v.vehicle)\n  .map(v => `- ${v.vehicle} | ${v.color || 'N/A'} | ${Number(v.mileage || 0).toLocaleString()} km | $${Number(v.price || 0).toLocaleString()}`)\n  .join('\\n');\n\nconst dealerName = $env.DEALERSHIP_NAME || 'Style Auto';\nconst dealerCity = $env.DEALERSHIP_CITY || 'Quebec';\nconst dealerHours = $env.DEALERSHIP_HOURS || 'Mon-Fri 9am-6pm, Sat 10am-4pm';\nconst salespersonName = $env.SALESPERSON_NAME || 'our sales team';\nconst salespersonPhone = $env.SALESPERSON_PHONE || '';\n\nconst systemPrompt = `You are the friendly, professional email assistant for ${dealerName}, a car dealership in ${dealerCity}.\nHours: ${dealerHours}\nSalesperson: ${salespersonName}${salespersonPhone ? ' (' + salespersonPhone + ')' : ''}\n\nCurrent available inventory:\n${inventoryList || '(No inventory loaded yet)'}\n\nYour job:\n- Write a warm, personalized welcome email to a new lead who just submitted an inquiry form\n- If they mentioned a specific vehicle, reference it and include relevant inventory details\n- If the vehicle they want is available, highlight it; if not, suggest similar options from inventory\n- Keep the tone conversational, warm, and professional — not robotic or salesy\n- End with a clear next step (e.g., \"Reply to this email or call us at...\")\n- Do NOT use placeholder brackets like [Name] — use the actual lead data provided\n\nRespond with ONLY a JSON object (no markdown, no code fences):\n{\"subject\": \"email subject line\", \"html\": \"<html email body with basic formatting>\", \"text\": \"plain text version\"}`;\n\nconst userPrompt = `New lead inquiry:\n- Name: ${lead.first_name}${lead.last_name ? ' ' + lead.last_name : ''}\n- Email: ${lead.email}\n- Phone: ${lead.phone || 'not provided'}\n- Vehicle interest: ${lead.vehicle_interest || 'general inquiry'}\n- Message: ${lead.message || '(none)'}\n\nWrite the welcome email.`;\n\nreturn [{ json: { system_prompt: systemPrompt, user_prompt: userPrompt, lead } }];"
+      },
+      "id": "build-prompt",
+      "name": "Build Email Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2420, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, system: $json.system_prompt, messages: [{ role: 'user', content: $json.user_prompt }] }) }}",
+        "options": {}
+      },
+      "id": "claude-api",
+      "name": "Claude API — Generate Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2640, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst lead = $('Build Email Prompt').first().json.lead;\n\nlet emailData;\ntry {\n  const content = response.content?.[0]?.text || '';\n  // Strip any code fences if Claude wraps them\n  const cleaned = content.replace(/^```json\\s*/i, '').replace(/```\\s*$/i, '').trim();\n  emailData = JSON.parse(cleaned);\n} catch (e) {\n  // Fallback template if Claude response can't be parsed\n  const dealerName = $env.DEALERSHIP_NAME || 'Style Auto';\n  emailData = {\n    subject: `Thanks for your inquiry, ${lead.first_name}!`,\n    html: `<p>Hi ${lead.first_name},</p><p>Thank you for reaching out to ${dealerName}! We received your inquiry${lead.vehicle_interest ? ' about the ' + lead.vehicle_interest : ''} and will get back to you shortly.</p><p>Best regards,<br/>${dealerName} Team</p>`,\n    text: `Hi ${lead.first_name}, thank you for reaching out to ${dealerName}! We received your inquiry${lead.vehicle_interest ? ' about the ' + lead.vehicle_interest : ''} and will get back to you shortly.`\n  };\n}\n\nreturn [{ json: { ...emailData, lead_id: lead.lead_id, lead_email: lead.email, lead_first_name: lead.first_name, company_id: lead.company_id, demo_mode: lead.demo_mode } }];"
+      },
+      "id": "parse-claude",
+      "name": "Parse Claude Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2860, 100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "demo-check",
+              "leftValue": "={{ $json.demo_mode }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-demo",
+      "name": "Demo Mode?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3080, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.RESEND_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: $env.RESEND_FROM_EMAIL || 'noreply@styleauto.ca', to: [$json.lead_email], subject: $json.subject, html: $json.html, text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "send-resend",
+      "name": "Send Email via Resend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3300, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Demo mode — skip Resend but pass data through\nconst data = $input.first().json;\nconsole.log('[DEMO] Would have sent email to:', data.lead_email);\nconsole.log('[DEMO] Subject:', data.subject);\nreturn [{ json: { ...data, _email_sent: false, _demo_skipped: true } }];"
+      },
+      "id": "demo-skip",
+      "name": "Demo: Skip Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3300, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge paths — pick up lead_id from either Resend response or demo skip\nconst data = $input.first().json;\nconst parsedData = $('Parse Claude Response').first().json;\n\n// Get the actual Supabase lead UUID (from the insert response)\nconst insertedLead = $('Insert Lead to Supabase').first().json;\nconst leadUuid = Array.isArray(insertedLead) ? insertedLead[0].id : insertedLead.id;\n\nreturn [{ json: { lead_id: leadUuid, company_id: parsedData.company_id, subject: parsedData.subject, email_sent: !data._demo_skipped, resend_id: data.id || null } }];"
+      },
+      "id": "merge-paths",
+      "name": "Merge Email Paths",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3520, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/activity_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ lead_id: $json.lead_id, company_id: $json.company_id, event_type: 'ai_auto_reply_sent', resend_message_id: $json.resend_id, metadata: { channel: 'email', subject: $json.subject, email_sent: $json.email_sent, resend_id: $json.resend_id } }) }}",
+        "options": {}
+      },
+      "id": "log-auto-reply",
+      "name": "Log: ai_auto_reply_sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3740, 100]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/leads?id=eq.{{ $json.lead_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ stage: 'contacted', sequence_step: 1 }) }}",
+        "options": {}
+      },
+      "id": "update-lead-stage",
+      "name": "Update Lead → Contacted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3960, 100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"ok\", \"lead_id\": \"{{ $('Merge Email Paths').first().json.lead_id }}\" }",
+        "options": {}
+      },
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [4180, 100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'error', errors: $('Normalize Form Data').first().json._validation_errors }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "respond-validation-error",
+      "name": "Respond: Validation Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [880, 420]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"duplicate\", \"existing_id\": \"{{ $json._existing_id }}\" }",
+        "options": {}
+      },
+      "id": "respond-duplicate",
+      "name": "Respond: Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1540, 320]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": { "main": [[{ "node": "Normalize Form Data", "type": "main", "index": 0 }]] },
+    "Normalize Form Data": { "main": [[{ "node": "Has Validation Errors?", "type": "main", "index": 0 }]] },
+    "Has Validation Errors?": {
+      "main": [
+        [{ "node": "Respond: Validation Error", "type": "main", "index": 0 }],
+        [{ "node": "Check Duplicate Email", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check Duplicate Email": { "main": [[{ "node": "Evaluate Duplicate", "type": "main", "index": 0 }]] },
+    "Evaluate Duplicate": { "main": [[{ "node": "Is Duplicate?", "type": "main", "index": 0 }]] },
+    "Is Duplicate?": {
+      "main": [
+        [{ "node": "Respond: Duplicate", "type": "main", "index": 0 }],
+        [{ "node": "Round Robin Assign", "type": "main", "index": 0 }]
+      ]
+    },
+    "Round Robin Assign": { "main": [[{ "node": "Insert Lead to Supabase", "type": "main", "index": 0 }]] },
+    "Insert Lead to Supabase": { "main": [[{ "node": "Log: form_submitted", "type": "main", "index": 0 }]] },
+    "Log: form_submitted": { "main": [[{ "node": "Fetch Available Inventory", "type": "main", "index": 0 }]] },
+    "Fetch Available Inventory": { "main": [[{ "node": "Build Email Prompt", "type": "main", "index": 0 }]] },
+    "Build Email Prompt": { "main": [[{ "node": "Claude API — Generate Email", "type": "main", "index": 0 }]] },
+    "Claude API — Generate Email": { "main": [[{ "node": "Parse Claude Response", "type": "main", "index": 0 }]] },
+    "Parse Claude Response": { "main": [[{ "node": "Demo Mode?", "type": "main", "index": 0 }]] },
+    "Demo Mode?": {
+      "main": [
+        [{ "node": "Demo: Skip Email", "type": "main", "index": 0 }],
+        [{ "node": "Send Email via Resend", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Email via Resend": { "main": [[{ "node": "Merge Email Paths", "type": "main", "index": 0 }]] },
+    "Demo: Skip Email": { "main": [[{ "node": "Merge Email Paths", "type": "main", "index": 0 }]] },
+    "Merge Email Paths": { "main": [[{ "node": "Log: ai_auto_reply_sent", "type": "main", "index": 0 }]] },
+    "Log: ai_auto_reply_sent": { "main": [[{ "node": "Update Lead → Contacted", "type": "main", "index": 0 }]] },
+    "Update Lead → Contacted": { "main": [[{ "node": "Respond Success", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "DealerCRM" }]
+}
+
