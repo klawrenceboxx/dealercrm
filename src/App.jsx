@@ -63,6 +63,7 @@ function Sidebar({ profile, userEmail }) {
   const initial = displayName[0].toUpperCase();
 
   async function handleLogout() {
+    localStorage.removeItem("demo_session");
     await supabase.auth.signOut();
   }
 
@@ -146,12 +147,21 @@ function Sidebar({ profile, userEmail }) {
   );
 }
 
+// TODO: remove DEMO_MODE once Supabase project is restored
+const DEMO_SESSION = { user: { email: "kaleellawarence-boxx@hotmail.ca" } };
+
 export default function App() {
-  const [session, setSession] = useState(null);
+  const [session, setSession] = useState(DEMO_SESSION); // TODO: restore auth
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (localStorage.getItem("demo_session") === "true") {
+      setSession(DEMO_SESSION);
+      setLoading(false);
+      return;
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       if (session) fetchProfile(session.user.id);
