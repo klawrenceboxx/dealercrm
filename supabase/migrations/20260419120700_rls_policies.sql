@@ -1,5 +1,53 @@
 -- Extend existing RLS helpers and apply owner-aware policies to current and new tables.
 
+-- Ensure profiles has the columns required by helper functions.
+alter table public.profiles add column if not exists suspended_at timestamptz;
+alter table public.profiles add column if not exists active boolean not null default true;
+alter table public.profiles add column if not exists phone text;
+alter table public.profiles add column if not exists rr_order integer not null default 0;
+
+-- Ensure leads has columns from 005_manager_backend_rls.
+alter table public.leads add column if not exists sold_at timestamptz;
+alter table public.leads add column if not exists sold_price numeric(10,2);
+alter table public.leads add column if not exists cost_of_car numeric(10,2);
+alter table public.leads add column if not exists recon_cost numeric(10,2) not null default 0;
+
+-- Ensure base helper functions exist (idempotent — safe if already present).
+create or replace function public.user_role()
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce((select role from public.profiles where id = auth.uid()), 'rep')
+$$;
+
+create or replace function public.current_user_is_active()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.profiles
+    where id = auth.uid()
+      and suspended_at is null
+  )
+$$;
+
+create or replace function public.is_manager_or_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.user_role() in ('manager', 'admin')
+$$;
+
 create or replace function public.is_owner()
 returns boolean
 language sql
@@ -318,16 +366,22 @@ create policy "templates_delete" on public.templates
     and public.is_manager_admin_or_owner()
   );
 
-drop policy if exists "crm_files_delete" on public.crm_files;
-
-create policy "crm_files_delete" on public.crm_files
-  for delete using (
-    public.current_user_is_active()
-    and (
-      public.is_manager_admin_or_owner()
-      or uploaded_by = auth.uid()
-    )
-  );
+do $$
+begin
+  if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'crm_files') then
+    drop policy if exists "crm_files_delete" on public.crm_files;
+    execute $p$
+      create policy "crm_files_delete" on public.crm_files
+        for delete using (
+          public.current_user_is_active()
+          and (
+            public.is_manager_admin_or_owner()
+            or uploaded_by = auth.uid()
+          )
+        )
+    $p$;
+  end if;
+end $$;
 
 drop policy if exists "messages_select" on public.messages;
 drop policy if exists "messages_insert" on public.messages;

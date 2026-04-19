@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Clock3, Edit2, FileText, Phone, Shield, Trash2, Upload, User, X } from "lucide-react";
 import { supabase } from "../lib/supabase";
 import { createSignedFileUrl, deleteCrmFile, formatFileSize, uploadCrmFile } from "../lib/crmFiles";
+import { getRoleLabel, isManagerAdminOrOwner } from "../lib/roles";
 import {
   DEFAULT_SHIFT_TIMEZONE,
   formatMinutesAsTimeInput,
@@ -28,19 +29,15 @@ const TEAM_TABS = [
   { id: "punch", label: "Punch In/Out" },
 ];
 
-function isManagerRole(role) {
-  return role === "manager" || role === "admin";
-}
-
 function getProfileName(profile) {
   return profile?.name || profile?.full_name || profile?.email || "Unknown";
 }
 
 function RoleBadge({ role }) {
-  return isManagerRole(role) ? (
+  return isManagerAdminOrOwner(role) ? (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">
       <Shield size={10} />
-      {role === "admin" ? "Admin" : "Manager"}
+      {getRoleLabel(role)}
     </span>
   ) : (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">
@@ -133,6 +130,7 @@ function EditMemberModal({ member, leadCount, onClose, onSave, onSuspensionChang
               <option value="rep">Sales Rep</option>
               <option value="manager">Manager</option>
               <option value="admin">Admin</option>
+              <option value="owner">Owner</option>
             </select>
           </div>
 
@@ -262,7 +260,7 @@ export default function Admin({ currentProfile }) {
   const [activeTeamTab, setActiveTeamTab] = useState("roster");
   const templateBodyRef = useRef(null);
 
-  const isManager = isManagerRole(currentProfile?.role);
+  const isManager = isManagerAdminOrOwner(currentProfile?.role);
   const currentUserId = currentProfile?.id || null;
 
   async function fetchData() {

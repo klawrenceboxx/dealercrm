@@ -1,6 +1,5 @@
 -- Migration 001: Multi-user support + VIN + schema fixes
--- Run this if you already applied the original schema.sql.
--- Safe to run multiple times (uses IF NOT EXISTS / DO NOTHING).
+-- Safe to run multiple times
 
 -- ── Profiles table ─────────────────────────────────────────────────────────
 create table if not exists profiles (
@@ -29,14 +28,23 @@ create trigger on_auth_user_created
   for each row execute procedure handle_new_user();
 
 alter table profiles enable row level security;
-create policy if not exists "users can view all profiles" on profiles
-  for select using (auth.role() = 'authenticated');
-create policy if not exists "users can update own profile" on profiles
-  for update using (auth.uid() = id);
 
--- Backfill profiles for existing auth users
-insert into profiles (id, full_name)
-select id, split_part(email, '@', 1)
+-- Clean policy setup
+drop policy if exists "users can view all profiles" on profiles;
+create policy "users can view all profiles"
+on profiles
+for select
+using (true);
+
+drop policy if exists "users can update own profile" on profiles;
+create policy "users can update own profile"
+on profiles
+for update
+using (auth.uid() = id);
+
+-- Backfill profiles for existing users
+insert into profiles (id, name, full_name)
+select id, split_part(email, '@', 1), split_part(email, '@', 1)
 from auth.users
 on conflict (id) do nothing;
 
@@ -48,8 +56,7 @@ create index if not exists leads_assigned_to_idx on leads (assigned_to);
 -- ── Notes: track creator ───────────────────────────────────────────────────
 alter table notes add column if not exists created_by uuid references profiles(id);
 
--- ── Inventory: rename mileage → mileage_km, add vin + available ───────────
--- Rename existing column if it exists
+-- ── Inventory updates ──────────────────────────────────────────────────────
 do $$
 begin
   if exists (
@@ -64,13 +71,11 @@ alter table inventory add column if not exists vin text;
 alter table inventory add column if not exists stock_number text;
 alter table inventory add column if not exists added_by uuid references profiles(id);
 
--- Add generated available column (requires dropping/recreating if status column exists)
 alter table inventory add column if not exists available boolean
   generated always as (status = 'available') stored;
 
 create index if not exists inventory_available_idx on inventory (available);
 create index if not exists inventory_vin_idx on inventory (vin);
 
--- Add unique constraint on vin (nullable — only enforced when vin is not null)
 create unique index if not exists inventory_vin_unique_idx on inventory (vin)
   where vin is not null;

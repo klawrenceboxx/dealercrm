@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from "react-router-dom";
 import { supabase } from "./lib/supabase";
 import { ProfileProvider, useProfile } from "./lib/ProfileContext";
-import { isManagerRole } from "./lib/roles";
+import { isManagerAdminOrOwner, isOwnerRole } from "./lib/roles";
 import Leads from "./pages/Leads";
 import LeadDetail from "./pages/LeadDetailPage";
 import Pipeline from "./pages/Pipeline";
@@ -10,6 +10,9 @@ import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
 import Admin from "./pages/Admin";
 import Login from "./pages/Login";
+import ReportsPage from "./pages/ReportsPage";
+import OwnerDashboardPage from "./pages/OwnerDashboardPage";
+import NotificationsPage from "./pages/NotificationsPage";
 
 const NAV_ITEMS = [
   {
@@ -50,7 +53,7 @@ const NAV_ITEMS = [
   {
     to: "/dashboard",
     label: "Dashboard",
-    managerOnly: true,
+    visible: (role) => isManagerAdminOrOwner(role),
     icon: (
       <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
         <rect x="3" y="3" width="7" height="7" rx="1" />
@@ -63,10 +66,42 @@ const NAV_ITEMS = [
   {
     to: "/admin",
     label: "Admin",
-    managerOnly: true,
+    visible: (role) => isManagerAdminOrOwner(role),
     icon: (
       <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
         <path d="M12 2l2.4 4.86 5.36.78-3.88 3.78.92 5.34L12 14.27 7.2 16.76l.92-5.34L4.24 7.64l5.36-.78L12 2z" />
+      </svg>
+    ),
+  },
+  {
+    to: "/reports",
+    label: "Reports",
+    visible: (role) => isManagerAdminOrOwner(role),
+    icon: (
+      <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+        <path d="M3 3v18h18" />
+        <path d="M7 15l4-4 3 3 5-7" />
+      </svg>
+    ),
+  },
+  {
+    to: "/owner",
+    label: "Owner",
+    visible: (role) => isOwnerRole(role),
+    icon: (
+      <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+        <path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z" />
+        <path d="M9 12l2 2 4-4" />
+      </svg>
+    ),
+  },
+  {
+    to: "/notifications",
+    label: "Notifications",
+    icon: (
+      <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+        <path d="M13.73 21a2 2 0 0 1-3.46 0" />
       </svg>
     ),
   },
@@ -75,7 +110,7 @@ const NAV_ITEMS = [
 function Sidebar({ profile, userEmail }) {
   const displayName = profile?.full_name || profile?.name || userEmail?.split("@")[0] || "User";
   const initial = displayName[0].toUpperCase();
-  const visibleNavItems = NAV_ITEMS.filter((item) => !item.managerOnly || isManagerRole(profile?.role));
+  const visibleNavItems = NAV_ITEMS.filter((item) => !item.visible || item.visible(profile?.role));
 
   async function handleLogout() {
     localStorage.removeItem("demo_session");
@@ -162,10 +197,20 @@ function Sidebar({ profile, userEmail }) {
   );
 }
 
-function ManagerRoute({ children }) {
+function ElevatedRoute({ children }) {
   const { profile } = useProfile();
 
-  if (!isManagerRole(profile?.role)) {
+  if (!isManagerAdminOrOwner(profile?.role)) {
+    return <Navigate to="/leads" replace />;
+  }
+
+  return children;
+}
+
+function OwnerRoute({ children }) {
+  const { profile } = useProfile();
+
+  if (!isOwnerRole(profile?.role)) {
     return <Navigate to="/leads" replace />;
   }
 
@@ -198,20 +243,37 @@ function AuthenticatedApp({ session }) {
           <Route path="/leads/:id" element={<LeadDetail />} />
           <Route path="/pipeline" element={<Pipeline />} />
           <Route path="/inventory" element={<Inventory />} />
+          <Route path="/notifications" element={<NotificationsPage />} />
           <Route
             path="/dashboard"
             element={(
-              <ManagerRoute>
+              <ElevatedRoute>
                 <Dashboard />
-              </ManagerRoute>
+              </ElevatedRoute>
             )}
           />
           <Route
             path="/admin"
             element={(
-              <ManagerRoute>
+              <ElevatedRoute>
                 <Admin currentProfile={profile} />
-              </ManagerRoute>
+              </ElevatedRoute>
+            )}
+          />
+          <Route
+            path="/reports"
+            element={(
+              <ElevatedRoute>
+                <ReportsPage />
+              </ElevatedRoute>
+            )}
+          />
+          <Route
+            path="/owner"
+            element={(
+              <OwnerRoute>
+                <OwnerDashboardPage />
+              </OwnerRoute>
             )}
           />
           <Route path="*" element={<Navigate to="/leads" replace />} />

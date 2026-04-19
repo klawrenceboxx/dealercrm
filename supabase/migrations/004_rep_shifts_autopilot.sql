@@ -8,6 +8,7 @@ insert into settings (key, value)
 values ('rr_index', '0'::jsonb)
 on conflict (key) do nothing;
 
+alter table profiles add column if not exists full_name text;
 alter table profiles add column if not exists name text;
 alter table profiles add column if not exists phone text;
 alter table profiles add column if not exists active boolean not null default true;
