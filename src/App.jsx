@@ -3,8 +3,9 @@ import { BrowserRouter, Routes, Route, NavLink, Navigate } from "react-router-do
 import { supabase } from "./lib/supabase";
 import { ProfileProvider, useProfile } from "./lib/ProfileContext";
 import { isManagerAdminOrOwner, isOwnerRole } from "./lib/roles";
+import NotificationBell from "./components/NotificationBell";
 import Leads from "./pages/Leads";
-import LeadDetail from "./pages/LeadDetailPage";
+import LeadDetail from "./pages/LeadDetail";
 import Pipeline from "./pages/Pipeline";
 import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
@@ -13,6 +14,20 @@ import Login from "./pages/Login";
 import ReportsPage from "./pages/ReportsPage";
 import OwnerDashboardPage from "./pages/OwnerDashboardPage";
 import NotificationsPage from "./pages/NotificationsPage";
+
+const DEMO_SESSION = {
+  user: {
+    id: "00000000-0000-0000-0000-000000000000",
+    email: "demo@dealercrm.local",
+    user_metadata: {
+      full_name: "Demo User",
+    },
+  },
+};
+
+function hasDemoSession() {
+  return typeof window !== "undefined" && window.localStorage.getItem("demo_session") === "true";
+}
 
 const NAV_ITEMS = [
   {
@@ -236,7 +251,18 @@ function AuthenticatedApp({ session }) {
   return (
     <div className="flex min-h-screen" style={{ backgroundColor: "#f1f5f9" }}>
       <Sidebar profile={profile} userEmail={session.user?.email} />
-      <main className="flex-1 overflow-auto">
+      <main className="flex-1 min-w-0 overflow-auto">
+        <div
+          className="sticky top-0 z-20 flex justify-end border-b px-6 py-4"
+          style={{
+            backgroundColor: "rgba(241,245,249,0.92)",
+            borderColor: "#e2e8f0",
+            backdropFilter: "blur(10px)",
+          }}
+        >
+          <NotificationBell userId={session.user?.id} />
+        </div>
+
         <Routes>
           <Route path="/" element={<Navigate to="/leads" replace />} />
           <Route path="/leads" element={<Leads />} />
@@ -284,16 +310,11 @@ function AuthenticatedApp({ session }) {
 }
 
 export default function App() {
-  const [session, setSession] = useState(DEMO_SESSION); // TODO: restore auth
-  const [profile, setProfile] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [session, setSession] = useState(() => (hasDemoSession() ? DEMO_SESSION : null));
+  const [loading, setLoading] = useState(() => !hasDemoSession());
 
   useEffect(() => {
-    if (localStorage.getItem("demo_session") === "true") {
-      setSession(DEMO_SESSION);
-      setLoading(false);
-      return;
-    }
+    if (hasDemoSession()) return undefined;
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);

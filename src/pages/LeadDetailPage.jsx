@@ -7,6 +7,7 @@ import { isManagerRole } from "../lib/roles";
 
 const STAGES = ["new", "contacted", "warm", "hot", "closed", "unsubscribed"];
 const FILE_TABS = ["overview", "files"];
+const WEBHOOK_WARNING = "n8n webhook not configured — message saved to DB but not delivered.";
 
 const STAGE_STYLES = {
   new: { bg: "#f1f5f9", color: "#475569" },
@@ -27,6 +28,7 @@ export default function LeadDetailPage() {
   const [activity, setActivity] = useState([]);
   const [files, setFiles] = useState([]);
   const [newNote, setNewNote] = useState("");
+  const [messageDraft, setMessageDraft] = useState("");
   const [dealForm, setDealForm] = useState({
     sold_price: "",
     cost_of_car: "",
@@ -38,19 +40,32 @@ export default function LeadDetailPage() {
   const [loading, setLoading] = useState(true);
   const [savingNote, setSavingNote] = useState(false);
   const [savingFinancials, setSavingFinancials] = useState(false);
+  const [sendingChannel, setSendingChannel] = useState("");
   const [uploadingFiles, setUploadingFiles] = useState(false);
   const [openingFileId, setOpeningFileId] = useState(null);
   const [deletingFileId, setDeletingFileId] = useState(null);
+  const [togglingHot, setTogglingHot] = useState(false);
+  const [composeError, setComposeError] = useState("");
+  const [deliveryWarning, setDeliveryWarning] = useState("");
   const currentUserRef = useRef(null);
   const isManager = isManagerRole(profile?.role);
+  const webhookBaseUrl = (import.meta.env.VITE_N8N_WEBHOOK_BASE_URL || "").trim();
 
   async function fetchAll() {
     setLoading(true);
 
     const [leadRes, messagesRes, notesRes, activityRes, filesRes] = await Promise.all([
       supabase.from("leads").select("*").eq("id", id).single(),
-      supabase.from("sms_log").select("*").eq("lead_id", id).order("sent_at", { ascending: true }),
-      supabase.from("notes").select("*").eq("lead_id", id).order("created_at", { ascending: false }),
+      supabase
+        .from("messages")
+        .select("id, lead_id, created_at, content, direction, channel, sender_type, sender_id, ai_generated, opened_at, delivered_at")
+        .eq("lead_id", id)
+        .order("created_at", { ascending: true }),
+      supabase
+        .from("notes")
+        .select("id, lead_id, content, created_by, created_at")
+        .eq("lead_id", id)
+        .order("created_at", { ascending: false }),
       supabase
         .from("activity_log")
         .select("id, event_type, metadata, created_at, actor_id, actor:profiles!activity_log_actor_id_fkey(full_name)")
@@ -132,6 +147,104 @@ export default function LeadDetailPage() {
 
     setNewNote("");
     setSavingNote(false);
+  }
+
+  async function toggleHotLead() {
+    if (!lead) return;
+
+    setTogglingHot(true);
+
+    const { data } = await supabase
+      .from("leads")
+      .update({ is_hot: !lead.is_hot })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (data) {
+      setLead(data);
+    }
+
+    setTogglingHot(false);
+  }
+
+  async function handleSendMessage(channel) {
+    const trimmedDraft = messageDraft.trim();
+
+    if (!trimmedDraft) return;
+
+    if (!currentUserRef.current) {
+      setComposeError("You need an active session before sending a message.");
+      return;
+    }
+
+    if (channel === "sms" && !lead?.phone) {
+      setComposeError("This lead does not have a phone number.");
+      return;
+    }
+
+    if (channel === "email" && !lead?.email) {
+      setComposeError("This lead does not have an email address.");
+      return;
+    }
+
+    setSendingChannel(channel);
+    setComposeError("");
+    setDeliveryWarning("");
+
+    try {
+      if (!webhookBaseUrl) {
+        // TODO: Replace this DB-only fallback with the outbound n8n workflow once that webhook contract is finalized.
+        const { data, error } = await supabase
+          .from("messages")
+          .insert({
+            lead_id: id,
+            content: trimmedDraft,
+            direction: "outbound",
+            channel,
+            sender_type: "rep",
+            sender_id: currentUserRef.current,
+            ai_generated: false,
+          })
+          .select("id, lead_id, created_at, content, direction, channel, sender_type, sender_id, ai_generated, opened_at, delivered_at")
+          .single();
+
+        if (error) {
+          throw error;
+        }
+
+        setMessages((current) => [...current, data]);
+        setMessageDraft("");
+        setDeliveryWarning(WEBHOOK_WARNING);
+        return;
+      }
+
+      const response = await fetch(webhookBaseUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          lead_id: id,
+          channel,
+          content: trimmedDraft,
+          sender_type: "rep",
+          sender_id: currentUserRef.current,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Webhook returned ${response.status}`);
+      }
+
+      setMessageDraft("");
+      await fetchAll();
+    } catch (error) {
+      console.error(`Failed to send ${channel}`, error);
+      setComposeError(`Failed to send ${channel.toUpperCase()}.`);
+    } finally {
+      setSendingChannel("");
+    }
   }
 
   async function saveFinancials(event) {
@@ -255,23 +368,38 @@ export default function LeadDetailPage() {
               <h1 className="text-lg font-semibold text-slate-900">{fullName}</h1>
               <p className="text-sm mt-0.5 text-slate-500">
                 {lead.phone}
-                {lead.email ? ` · ${lead.email}` : ""}
+                {lead.email ? ` | ${lead.email}` : ""}
               </p>
             </div>
           </div>
 
-          <select
-            value={lead.stage}
-            onChange={(event) => updateStage(event.target.value)}
-            className="text-xs font-semibold px-3 py-1.5 rounded-full border-0 cursor-pointer capitalize focus:outline-none"
-            style={{ backgroundColor: stageStyle.bg, color: stageStyle.color }}
-          >
-            {STAGES.map((stage) => (
-              <option key={stage} value={stage}>
-                {stage}
-              </option>
-            ))}
-          </select>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={toggleHotLead}
+              disabled={togglingHot}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                lead.is_hot
+                  ? "border-rose-200 bg-rose-50 text-rose-700"
+                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+              } disabled:opacity-50`}
+            >
+              {togglingHot ? "Saving..." : lead.is_hot ? "Hot lead" : "Mark hot"}
+            </button>
+
+            <select
+              value={lead.stage}
+              onChange={(event) => updateStage(event.target.value)}
+              className="text-xs font-semibold px-3 py-1.5 rounded-full border-0 cursor-pointer capitalize focus:outline-none"
+              style={{ backgroundColor: stageStyle.bg, color: stageStyle.color }}
+            >
+              {STAGES.map((stage) => (
+                <option key={stage} value={stage}>
+                  {stage}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <div className="flex gap-2 mt-5 border-b border-slate-200">
@@ -353,7 +481,68 @@ export default function LeadDetailPage() {
 
           <div className="grid gap-4 xl:grid-cols-2">
             <section className="bg-white rounded-xl p-5" style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
-              <h2 className="text-xs font-semibold tracking-wider mb-4 text-slate-500">SMS THREAD</h2>
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <h2 className="text-xs font-semibold tracking-wider text-slate-500">CONVERSATION</h2>
+                  <p className="text-sm mt-1 text-slate-500">
+                    Unified SMS and email timeline from the `messages` table.
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 p-4 mb-4 bg-slate-50">
+                <label className="block text-xs font-semibold tracking-wider text-slate-500 mb-2">
+                  NEW MESSAGE
+                </label>
+                <textarea
+                  value={messageDraft}
+                  onChange={(event) => {
+                    setMessageDraft(event.target.value);
+                    if (composeError) {
+                      setComposeError("");
+                    }
+                    if (deliveryWarning) {
+                      setDeliveryWarning("");
+                    }
+                  }}
+                  placeholder="Write an SMS or email update..."
+                  rows={4}
+                  className="w-full text-sm px-3 py-2.5 border rounded-lg resize-none focus:outline-none"
+                  style={{ borderColor: "#cbd5e1", color: "#0f172a", backgroundColor: "#ffffff" }}
+                />
+                <div className="flex flex-wrap items-center gap-2 mt-3">
+                  <button
+                    type="button"
+                    onClick={() => handleSendMessage("sms")}
+                    disabled={!messageDraft.trim() || sendingChannel === "sms" || !lead.phone}
+                    className="px-4 py-2 text-sm font-semibold rounded-lg text-white disabled:opacity-50"
+                    style={{ backgroundColor: "#2563eb" }}
+                  >
+                    {sendingChannel === "sms" ? "Sending SMS..." : "Send SMS"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSendMessage("email")}
+                    disabled={!messageDraft.trim() || sendingChannel === "email" || !lead.email}
+                    className="px-4 py-2 text-sm font-semibold rounded-lg border border-slate-300 text-slate-700 bg-white disabled:opacity-50"
+                  >
+                    {sendingChannel === "email" ? "Sending Email..." : "Send Email"}
+                  </button>
+                  {!lead.phone ? (
+                    <span className="text-xs text-slate-400">No phone number on this lead.</span>
+                  ) : null}
+                  {!lead.email ? (
+                    <span className="text-xs text-slate-400">No email address on this lead.</span>
+                  ) : null}
+                </div>
+                {composeError ? (
+                  <p className="mt-3 text-sm text-rose-600">{composeError}</p>
+                ) : null}
+                {deliveryWarning ? (
+                  <p className="mt-3 text-sm text-amber-700">{deliveryWarning}</p>
+                ) : null}
+              </div>
+
               <div className="space-y-2 overflow-y-auto" style={{ maxHeight: 380 }}>
                 {messages.length === 0 ? (
                   <p className="text-xs text-slate-400">No messages yet.</p>
@@ -367,10 +556,18 @@ export default function LeadDetailPage() {
                         color: message.direction === "outbound" ? "white" : "#0f172a",
                       }}
                     >
-                      <p className="leading-relaxed">{message.body}</p>
+                      <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                        <span className="text-[11px] font-semibold uppercase tracking-wide opacity-80">
+                          {message.channel}
+                        </span>
+                        <span className="text-[11px] opacity-70">
+                          {getMessageSenderLabel(message)}
+                        </span>
+                      </div>
+                      <p className="leading-relaxed whitespace-pre-wrap">{message.content}</p>
                       <p className="text-xs mt-1 opacity-70">
-                        {new Date(message.sent_at).toLocaleString()}
-                        {message.demo ? " · demo" : ""}
+                        {new Date(message.created_at).toLocaleString()}
+                        {message.ai_generated ? " | AI" : ""}
                       </p>
                     </div>
                   ))
@@ -484,7 +681,7 @@ export default function LeadDetailPage() {
                       </span>
                     </div>
                     <p className="text-xs text-slate-400 mt-1">
-                      {formatFileSize(file.file_size)} · {new Date(file.created_at).toLocaleString()}
+                      {formatFileSize(file.file_size)} | {new Date(file.created_at).toLocaleString()}
                     </p>
                   </div>
 
@@ -611,6 +808,22 @@ function describeActivity(entry, actorName) {
   }
 }
 
+function getMessageSenderLabel(message) {
+  if (message.sender_type === "lead") {
+    return "Lead";
+  }
+
+  if (message.sender_type === "rep") {
+    return "Rep";
+  }
+
+  if (message.sender_type === "ai") {
+    return "AI";
+  }
+
+  return "System";
+}
+
 function toDateTimeLocalValue(value) {
   if (!value) return "";
 
@@ -630,3 +843,4 @@ function formatCurrency(value) {
     maximumFractionDigits: 0,
   }).format(value || 0);
 }
+
