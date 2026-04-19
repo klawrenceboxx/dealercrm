@@ -18,9 +18,19 @@ You are Kaleel's dev assistant for the `dealercrm` project. Stay focused on this
 
 Custom CRM replacing AutoRaptor for Eli Doueri's car dealership (Style Auto, Quebec). Built for Sleiman Moujaes (Eli's nephew) as daily user.
 
-- **Strategy:** Demo-first. Fake leads. Show client. Get sign-off. Swap credentials. Invoice.
+- **Strategy:** Production-first. Build a complete, reliable working application that can replace AutoRaptor in daily dealership operations.
+- **Standard:** Do not optimize for mock flows, fake polish, or demo-only shortcuts. Prefer durable workflows, real data handling, role-based permissions, and operational completeness.
+- **Goal:** Ship a system sales reps and managers can actually use all day for lead intake, follow-up, pipeline management, reporting, inventory context, and communication history.
 - **Budget:** $2,000 client / ~$1,800 after fees
 - **Client cost:** ~$28-35/month (Supabase + Twilio + n8n + Codex API)
+
+## Product Priorities
+
+1. Core CRM workflows must work end-to-end in production conditions.
+2. UI must support daily rep and manager work, not just look presentable.
+3. Data integrity, auditability, and role-based access control take priority over cosmetic speed.
+4. Avoid placeholder implementations when the real workflow can be built now.
+5. If a feature is incomplete, define the missing operational pieces explicitly instead of treating it as "good enough for demo."
 
 ## Stack
 
@@ -65,7 +75,7 @@ Login, Leads, LeadDetail, Pipeline, Dashboard, Team, Schedule, Inventory
 - **DB migration** (`supabase/003_companies_activity.sql`) — `companies` table, `activity_log` table, `company_id` on leads
 - **Activity tab** in LeadDetail.jsx — timeline of form_submitted, ai_auto_reply_sent, email_opened, email_clicked events
 
-## What's NOT Built Yet
+## Production Gaps
 
 1. n8n SMS workflows (01-05) — see `workflows/eli-doueri/sms-lead-funnel.md`
 2. SMS Templates page — CRUD for `templates` table
@@ -73,6 +83,12 @@ Login, Leads, LeadDetail, Pipeline, Dashboard, Team, Schedule, Inventory
 4. Vercel deploy — push latest, confirm live URL
 5. Resend webhooks — track email opens/clicks → activity_log
 6. Twilio SMS integration for form leads (currently email-only)
+
+The list below is not exhaustive. In addition to workflow and integration gaps, production readiness also requires:
+
+1. action-first rep workflow UI across Leads, Lead Detail, and Pipeline
+2. manager operating visibility and controls in Dashboard and Admin
+3. production deployment hardening, verification, and live environment validation
 
 ## Tools
 
@@ -87,6 +103,12 @@ See `.env.example`. Frontend uses `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`
 ## Communication Rules
 
 Rules in `.Codex/rules/`. Default: bullet points, short, casual internally, professional externally.
+
+## Delivery Expectations
+
+- Finish workflow logic and UI together. Avoid shipping backend capability with no usable operator surface.
+- When evaluating progress, ask whether a rep or manager could complete the real task without workarounds.
+- Prefer explicit production checklists: happy path, edge cases, error handling, permissions, audit trail, and verification.
 
 ## Skills Architecture
 
