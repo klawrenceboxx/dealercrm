@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { supabase } from "../lib/supabase";
 
+// TODO: remove DEMO_MODE once Supabase project is restored
+const DEMO_EMAIL = "kaleellawarence-boxx@hotmail.ca";
+const DEMO_PASSWORD = "K@leel1207";
+
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -11,6 +15,13 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     setError("");
+
+    if (email === DEMO_EMAIL && password === DEMO_PASSWORD) {
+      localStorage.setItem("demo_session", "true");
+      window.location.reload();
+      return;
+    }
+
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) setError(error.message);
     setLoading(false);

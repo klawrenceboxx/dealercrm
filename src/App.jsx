@@ -78,6 +78,7 @@ function Sidebar({ profile, userEmail }) {
   const visibleNavItems = NAV_ITEMS.filter((item) => !item.managerOnly || isManagerRole(profile?.role));
 
   async function handleLogout() {
+    localStorage.removeItem("demo_session");
     await supabase.auth.signOut();
   }
 
@@ -221,10 +222,17 @@ function AuthenticatedApp({ session }) {
 }
 
 export default function App() {
-  const [session, setSession] = useState(null);
+  const [session, setSession] = useState(DEMO_SESSION); // TODO: restore auth
+  const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (localStorage.getItem("demo_session") === "true") {
+      setSession(DEMO_SESSION);
+      setLoading(false);
+      return;
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setLoading(false);
